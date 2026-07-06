@@ -22,7 +22,7 @@
 红娘通过对话了解你，帮你筛选、传话、把关<br>
 她知道你在对话中透露的每一个细节——比任何算法都更懂你
 
-[安装](#安装) · [使用](#使用) · [它能做什么](#红娘能做什么) · [架构](#架构) · [技术报告](TECHNICAL-REPORT.md)
+[安装](#安装) · [使用教程](TUTORIAL.md) · [它能做什么](#红娘能做什么) · [架构](#架构) · [技术报告](TECHNICAL-REPORT.md)
 
 </div>
 
@@ -47,7 +47,7 @@ Created by [@zwbao](https://github.com/zwbao)
 │   │ 传话 → 帮你问,帮你答  │ │                   │   │                        │ │
 │   │ 引导 → 你真正要什么    │ │    反馈闭环        │   │ 自进化: 每日复盘        │ │
 │   └────────────────────────┘ │ ───────────────→  │   │ 越用越准               │ │
-│                              │                   │   └────────────────────────┘ │
+│   hongniang CLI + 本地状态    │                   │   └────────────────────────┘ │
 │   对话记录只在这里,不上传     │                   │   只有结构化画像,没有对话     │
 │                              │                   │                              │
 └──────────────────────────────┘                   └──────────────────────────────┘
@@ -59,6 +59,15 @@ Created by [@zwbao](https://github.com/zwbao)
 
 她的筛选判断会回传给后端，后端从中学习——如果某类推荐总被红娘压住，说明匹配逻辑在那个维度上不准。**用户越多，每位红娘越聪明。**
 
+### 客户端的设计
+
+判断力归红娘（LLM），时序和状态归代码：
+
+- **一个 CLI 统一入口。** 所有后端交互走 `scripts/hongniang`，配置、网络、状态逻辑集中管理。
+- **本地状态快照。** CLI 记住上次见过的推荐状态、已读消息、筛选记录。`hongniang sync` 一条命令拉取全量数据并直接输出"发生了什么变化"——红娘每次打开就知道有什么新消息，不靠猜。
+- **流程不变量由代码强制。** "红娘先筛选、再展示给用户"不是口头约定：没有筛选记录的推荐无法直接回应。
+- **档案增量更新不丢数据。** 字符串数组（爱好/标签/dealbreaker）自动取并集，渐进式补充档案不会覆盖旧信息。
+
 ---
 
 ## 安装
@@ -66,7 +75,7 @@ Created by [@zwbao](https://github.com/zwbao)
 ### Claude Code
 
 ```bash
-git clone https://github.com/zwbao/hongniang.skill.git ~/.claude/skills/hongniang
+git clone https://github.com/zwbao/hongniang-skill.git ~/.claude/skills/hongniang
 ```
 
 ### 其他支持 Agent Skills 的工具
@@ -75,7 +84,7 @@ git clone https://github.com/zwbao/hongniang.skill.git ~/.claude/skills/hongnian
 
 ### 依赖
 
-- `curl` 和 `jq`（脚本调用 API 需要）
+- `curl` 和 `jq`
 
 ---
 
@@ -90,6 +99,8 @@ git clone https://github.com/zwbao/hongniang.skill.git ~/.claude/skills/hongnian
 或者 "我想找对象"、"帮我看看有没有合适的人"。
 
 第一次，红娘会跟你聊天——了解你的工作、生活、性格。你甚至不会意识到自己在"建档"。之后每次来，她会检查有没有新进展、新推荐，像一个真正在帮你操心的人。
+
+不知道下一步该说什么？直接问她"你能帮我做什么"。完整的使用说明和常见问题见 **[使用教程](TUTORIAL.md)**。
 
 ---
 
@@ -108,10 +119,14 @@ git clone https://github.com/zwbao/hongniang.skill.git ~/.claude/skills/hongnian
 
 ## 隐私
 
-- 你和红娘的对话**只存在你的本地设备上**，永不上传
-- 联系方式只存本地，双方同意后才交换
-- 后端只有结构化画像（年龄、城市、性格标签），没有姓名，没有对话
-- 随时可以注销，删除所有数据
+说清楚哪些数据在哪里，不夸大：
+
+- 你和红娘的**对话原文只存在你的本地设备上**，不上传。
+- 上传到服务器的是**结构化画像**（年龄、城市、性格标签等，不含姓名）、红娘的筛选理由和你通过红娘传的话。
+- **联系方式平时只存本地**；双方都同意匹配后，才会经服务器中转交换给对方。
+- 随时可以注销（`hongniang profile delete`），删除服务器档案和全部本地数据。
+
+端到端加密的联系方式与传话中转（服务器"看不了"而不只是"不看"）在路线图中，见[技术报告](TECHNICAL-REPORT.md)。
 
 ---
 
@@ -130,7 +145,7 @@ git clone https://github.com/zwbao/hongniang.skill.git ~/.claude/skills/hongnian
 
 > **[TECHNICAL-REPORT.md](TECHNICAL-REPORT.md)**
 >
-> 详细的前后端架构设计、三层漏斗匹配引擎、自进化系统、传话机制、API 文档和数据安全方案。
+> 详细的前后端架构设计、三层漏斗匹配引擎、自进化系统、传话机制、API 文档、数据安全方案与演进路线图。
 
 ---
 

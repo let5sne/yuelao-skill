@@ -1,0 +1,492 @@
+#!/usr/bin/env bash
+# 红娘 CLI v0.2 — 统一入口
+#
+# 所有后端交互和本地状态管理都在这一个脚本里。
+# 本地文件（默认 ~/.hongniang/，可用 HONGNIANG_HOME 覆盖）：
+#   config.json         user_id / api_token / backend_url / contact（联系方式只存本地）
+#   state.json          上次同步的推荐状态快照、已见消息、筛选记录、交换记录、反馈记录
+#   profile-cache.json  档案本地缓存（增量更新时深度合并用）
+#
+# 用法: hongniang <command> [args]，运行 hongniang help 查看全部命令。
+
+set -euo pipefail
+
+HN_DIR="${HONGNIANG_HOME:-$HOME/.hongniang}"
+CONFIG="$HN_DIR/config.json"
+STATE="$HN_DIR/state.json"
+CACHE="$HN_DIR/profile-cache.json"
+DEFAULT_BACKEND="http://43.163.116.103:8010"
+API_BASE="/api/v1/hongniang"
+
+err() { echo "ERROR: $*" >&2; exit 1; }
+
+for c in curl jq; do
+  command -v "$c" >/dev/null 2>&1 || err "$c is required but not installed."
+done
+
+# ---------- 配置 ----------
+
+# v0.1 的 config.yaml 自动迁移为 config.json
+migrate_config() {
+  local old="$HN_DIR/config.yaml"
+  if [[ -f "$CONFIG" || ! -f "$old" ]]; then return 0; fi
+  local uid tok url ctype cval
+  uid=$(grep '^user_id:' "$old" 2>/dev/null | sed 's/^user_id:[[:space:]]*//' | tr -d "'\"" || true)
+  tok=$(grep '^api_token:' "$old" 2>/dev/null | sed 's/^api_token:[[:space:]]*//' | tr -d "'\"" || true)
+  url=$(grep '^backend_url:' "$old" 2>/dev/null | sed 's/^backend_url:[[:space:]]*//' | tr -d "'\"" || true)
+  ctype=$(awk '/^contact:/{f=1;next} f&&/^[^ ]/{f=0} f&&/^  type:/{sub(/^  type:[[:space:]]*/,"");gsub(/['\''"]/,"");print}' "$old" || true)
+  cval=$(awk '/^contact:/{f=1;next} f&&/^[^ ]/{f=0} f&&/^  value:/{sub(/^  value:[[:space:]]*/,"");gsub(/['\''"]/,"");print}' "$old" || true)
+  [[ -n "$uid" && -n "$tok" ]] || return 0
+  mkdir -p "$HN_DIR"
+  jq -n --arg u "$uid" --arg t "$tok" --arg b "${url:-$DEFAULT_BACKEND}" \
+        --arg ct "${ctype:-}" --arg cv "${cval:-}" \
+    '{user_id:$u, api_token:$t, backend_url:$b, contact:{type:$ct, value:$cv}}' > "$CONFIG"
+  chmod 600 "$CONFIG"
+  echo "Migrated config.yaml -> config.json" >&2
+}
+
+cfg() { jq -r ".$1 // empty" "$CONFIG"; }
+
+require_config() {
+  migrate_config
+  [[ -f "$CONFIG" ]] || err "Not registered. Run: hongniang register '<profile_json>'"
+}
+
+# ---------- 本地状态 ----------
+
+ensure_state() {
+  mkdir -p "$HN_DIR"
+  if [[ ! -f "$STATE" ]]; then
+    echo '{"recs":{},"seen_messages":[],"filters":{},"exchanges":{},"feedback":[],"last_sync":0}' > "$STATE"
+    chmod 600 "$STATE"
+  fi
+}
+
+update_state() { # usage: update_state [--arg k v ...] '<jq program>'
+  local tmp
+  tmp=$(mktemp)
+  jq "$@" "$STATE" > "$tmp" && mv "$tmp" "$STATE"
+  chmod 600 "$STATE"
+}
+
+# ---------- API ----------
+
+api() { # api METHOD PATH [JSON_DATA]
+  local method="$1" path="$2" data="${3:-}"
+  local url token resp code body
+  url="$(cfg backend_url)${path}"
+  token="$(cfg api_token)"
+  local args=(-sS --max-time 20 -X "$method"
+              -H "Content-Type: application/json"
+              -H "Authorization: Bearer ${token}"
+              -w $'\n%{http_code}')
+  if [[ "$method" == "GET" ]]; then args+=(--retry 2); fi
+  if [[ -n "$data" ]]; then args+=(-d "$data"); fi
+  resp=$(curl "${args[@]}" "$url") || { echo "ERROR: network failure calling ${path}" >&2; return 1; }
+  code=$(printf '%s\n' "$resp" | tail -n1)
+  body=$(printf '%s\n' "$resp" | sed '$d')
+  if [[ "$code" -ge 400 ]]; then
+    echo "ERROR: HTTP $code from ${path}" >&2
+    echo "$body" >&2
+    return 1
+  fi
+  printf '%s\n' "$body"
+}
+
+require_json() { echo "$1" | jq empty >/dev/null 2>&1 || err "Invalid JSON: $1"; }
+
+# ---------- 命令 ----------
+
+cmd_register() {
+  local input="${1:-}" backend="${2:-$DEFAULT_BACKEND}"
+  [[ -n "$input" ]] || err "Usage: hongniang register '<json>' [backend_url]  (or '-' for stdin)"
+  migrate_config
+  [[ -f "$CONFIG" ]] && err "Already registered ($CONFIG exists). Use 'hongniang profile update' instead."
+  local json
+  if [[ "$input" == "-" ]]; then json=$(cat)
+  elif [[ -f "$input" ]]; then json=$(cat "$input")
+  else json="$input"; fi
+  require_json "$json"
+
+  local resp code body uid tok
+  resp=$(curl -sS --max-time 30 -X POST -H "Content-Type: application/json" \
+              -w $'\n%{http_code}' -d "$json" "${backend}${API_BASE}/profile") \
+    || err "network failure calling ${backend}"
+  code=$(printf '%s\n' "$resp" | tail -n1)
+  body=$(printf '%s\n' "$resp" | sed '$d')
+  [[ "$code" -ge 400 ]] && err "Registration failed with HTTP $code: $body"
+  uid=$(echo "$body" | jq -r '.user_id // empty')
+  tok=$(echo "$body" | jq -r '.api_token // empty')
+  [[ -n "$uid" && -n "$tok" ]] || err "Invalid response from server: $body"
+
+  mkdir -p "$HN_DIR"
+  jq -n --arg u "$uid" --arg t "$tok" --arg b "$backend" \
+    '{user_id:$u, api_token:$t, backend_url:$b, contact:{type:"", value:""}}' > "$CONFIG"
+  chmod 600 "$CONFIG"
+  echo "$json" | jq . > "$CACHE"
+  chmod 600 "$CACHE"
+  ensure_state
+  echo "Registered. user_id: $uid"
+  echo "Next: save contact info locally with: hongniang contact set wechat <微信号>"
+}
+
+cmd_contact() {
+  require_config
+  case "${1:-}" in
+    set)
+      local type="${2:-}" value="${3:-}"
+      [[ -n "$type" && -n "$value" ]] || err "Usage: hongniang contact set <type> <value>  e.g. contact set wechat abc123"
+      local tmp; tmp=$(mktemp)
+      jq --arg t "$type" --arg v "$value" '.contact = {type:$t, value:$v}' "$CONFIG" > "$tmp" && mv "$tmp" "$CONFIG"
+      chmod 600 "$CONFIG"
+      echo "Contact saved locally (${type}). It is only sent to the server when you explicitly exchange after a mutual match."
+      ;;
+    get) jq '.contact' "$CONFIG" ;;
+    *) err "Usage: hongniang contact <set|get> [type value]" ;;
+  esac
+}
+
+cmd_sync() {
+  require_config; ensure_state
+  local uid; uid=$(cfg user_id)
+
+  local recs_raw inbox_raw pause_raw
+  recs_raw=$(api GET "${API_BASE}/recommendations/${uid}") || recs_raw='[]'
+  inbox_raw=$(api GET "${API_BASE}/messages/${uid}" 2>/dev/null) || inbox_raw='[]'
+  pause_raw=$(api GET "${API_BASE}/profile/${uid}/pause" 2>/dev/null) || pause_raw='{}'
+
+  local recs inbox
+  recs=$(echo "$recs_raw" | jq '(.recommendations // .) | if type=="array" then . else [] end')
+  inbox=$(echo "$inbox_raw" | jq '(.messages // .) | if type=="array" then . else [] end')
+  echo "$pause_raw" | jq -e 'type=="object"' >/dev/null 2>&1 || pause_raw='{}'
+
+  # 对"已提交联系方式但还没拿到对方的"匹配，自动查一次交换进度
+  local new_contacts='[]' mid sub got res c
+  for mid in $(echo "$recs" | jq -r '.[] | select((.status // "") == "matched") | (.match_id // .id) | tostring'); do
+    sub=$(jq -r --arg m "$mid" '.exchanges[$m].submitted // false' "$STATE")
+    got=$(jq -r --arg m "$mid" '.exchanges[$m].partner_contact // empty' "$STATE")
+    if [[ "$sub" == "true" && -z "$got" ]]; then
+      res=$(api GET "${API_BASE}/exchange/${mid}?user_id=${uid}" 2>/dev/null) || res='{}'
+      c=$(echo "$res" | jq -r '.contact // empty')
+      if [[ -n "$c" ]]; then
+        update_state --arg m "$mid" --arg c "$c" \
+          '.exchanges[$m].partner_contact = $c | .exchanges[$m].received_at = (now|floor)'
+        new_contacts=$(echo "$new_contacts" | jq --arg m "$mid" --arg c "$c" '. + [{match_id:$m, contact:$c}]')
+      fi
+    fi
+  done
+
+  # 与上次快照对比，生成变化摘要
+  jq -n \
+    --argjson recs "$recs" \
+    --argjson inbox "$inbox" \
+    --argjson pause "$pause_raw" \
+    --argjson newc "$new_contacts" \
+    --argjson old "$(jq '.recs' "$STATE")" \
+    --argjson seen "$(jq '.seen_messages' "$STATE")" \
+    --argjson filters "$(jq '.filters' "$STATE")" \
+    --argjson exch "$(jq '.exchanges' "$STATE")" \
+    --argjson fb "$(jq '.feedback' "$STATE")" '
+    def rid: ((.id // .recommendation_id // "") | tostring);
+    {
+      synced_at: (now | floor),
+      paused: ($pause.status // "active"),
+      changes: {
+        new_recommendations: [ $recs[] | select($old[rid] == null) | rid ],
+        status_changes: [ $recs[] | rid as $r
+          | select(($old[$r] != null) and ($old[$r] != (.status // "unknown")))
+          | {id: $r, from: $old[$r], to: (.status // "unknown")} ],
+        new_messages: [ $inbox[] | select( ((.id | tostring) as $i | ($seen | index($i)) | not) ) ],
+        contacts_received: $newc
+      },
+      needs_filter: [ $recs[] | select((.status // "") == "pending") | select($filters[rid] == null) ],
+      recommendations: ($recs | group_by(.status // "unknown")
+        | map({key: (.[0].status // "unknown"), value: .}) | from_entries),
+      inbox_unread: [ $inbox[] | select((.read_at // null) == null) ],
+      followups_due: [ $recs[] | select((.status // "") == "matched") | rid as $r
+        | ((.match_id // .id) | tostring) as $m
+        | select($exch[$m].partner_contact != null)
+        | select(($fb | index($r)) == null)
+        | ((now - ($exch[$m].received_at // now)) / 86400 | floor) as $d
+        | select($d >= 3)
+        | {rec_id: $r, match_id: $m, days_since_contact: $d} ]
+    }'
+
+  # 更新快照
+  update_state --argjson recs "$recs" --argjson inbox "$inbox" '
+    def rid: ((.id // .recommendation_id // "") | tostring);
+    .recs = ($recs | map({key: rid, value: (.status // "unknown")}) | from_entries)
+    | .seen_messages = ((.seen_messages + ($inbox | map(.id | tostring))) | unique)
+    | .last_sync = (now | floor)'
+}
+
+cmd_filter() {
+  require_config; ensure_state
+  local rec="${1:-}" action="${2:-}" rank="${3:-}" reason="${4:-}"
+  [[ -n "$rec" && -n "$action" ]] || err "Usage: hongniang filter <recommendation_id> <shown|suppressed> [rank] [reason]"
+  [[ "$action" == "shown" || "$action" == "suppressed" ]] || err "Action must be 'shown' or 'suppressed'"
+  local uid payload
+  uid=$(cfg user_id)
+  payload=$(jq -n --arg u "$uid" --arg a "$action" --arg rk "$rank" --arg rs "$reason" \
+    '{user_id:$u, action:$a,
+      rank:   (if $rk == "" then null else ($rk | tonumber) end),
+      reason: (if $rs == "" then null else $rs end)}')
+  api POST "${API_BASE}/recommendations/${rec}/filter" "$payload" >/dev/null
+  update_state --arg id "$rec" --arg a "$action" --arg rs "$reason" \
+    '.filters[$id] = {action:$a, reason:$rs, ts:(now|floor)}'
+  echo "Filter recorded: rec ${rec} -> ${action}"
+}
+
+cmd_respond() {
+  require_config; ensure_state
+  local action="${1:-}" rec="${2:-}" reason="" force=0 arg
+  shift 2 2>/dev/null || err "Usage: hongniang respond <accept|reject> <recommendation_id> [reason] [--force]"
+  for arg in "$@"; do
+    if [[ "$arg" == "--force" ]]; then force=1; else reason="$arg"; fi
+  done
+  [[ "$action" == "accept" || "$action" == "reject" ]] || err "Action must be 'accept' or 'reject'"
+
+  # 强制"先筛后展"：没有 filter 记录的推荐不能直接回应
+  local verdict
+  verdict=$(jq -r --arg id "$rec" '.filters[$id].action // empty' "$STATE")
+  if [[ -z "$verdict" && "$force" -ne 1 ]]; then
+    err "推荐 ${rec} 还没有筛选记录。正确顺序是：先判断并运行 hongniang filter ${rec} <shown|suppressed> [rank] [reason]，再展示给用户，用户表态后才 respond。（确需跳过：追加 --force）"
+  fi
+
+  local uid payload
+  uid=$(cfg user_id)
+  payload=$(jq -n --arg u "$uid" --arg r "$rec" --arg a "$action" --arg rs "$reason" \
+    '{user_id:$u, recommendation_id:($r|tonumber), response:$a, reason:$rs}')
+  api POST "${API_BASE}/response" "$payload"
+  echo "Response recorded: ${action} (rec ${rec})"
+}
+
+cmd_exchange() {
+  require_config; ensure_state
+  local action="${1:-}" mid="${2:-}"
+  [[ -n "$action" && -n "$mid" ]] || err "Usage: hongniang exchange <submit|get> <match_id> [contact]"
+  local uid; uid=$(cfg user_id)
+  case "$action" in
+    submit)
+      local contact="${3:-}"
+      if [[ -z "$contact" ]]; then
+        local ct cv
+        ct=$(jq -r '.contact.type // empty' "$CONFIG")
+        cv=$(jq -r '.contact.value // empty' "$CONFIG")
+        [[ -n "$cv" ]] || err "No contact info. Run: hongniang contact set wechat <微信号>  (or pass contact as argument)"
+        contact="${ct}:${cv}"
+      fi
+      local payload
+      payload=$(jq -n --arg u "$uid" --arg c "$contact" '{user_id:$u, contact:$c}')
+      api POST "${API_BASE}/exchange/${mid}" "$payload" >/dev/null
+      update_state --arg m "$mid" '.exchanges[$m] = ((.exchanges[$m] // {}) + {submitted:true, submitted_at:(now|floor)})'
+      echo "Contact submitted for match ${mid}. Waiting for the other party."
+      ;;
+    get)
+      local res c
+      res=$(api GET "${API_BASE}/exchange/${mid}?user_id=${uid}")
+      c=$(echo "$res" | jq -r '.contact // empty')
+      if [[ -n "$c" ]]; then
+        update_state --arg m "$mid" --arg c "$c" \
+          '.exchanges[$m] = ((.exchanges[$m] // {}) + {partner_contact:$c, received_at:(now|floor)})'
+        echo "Match ${mid} contact: ${c}"
+      else
+        echo "Waiting for the other party to submit their contact info."
+      fi
+      ;;
+    *) err "Usage: hongniang exchange <submit|get> <match_id> [contact]" ;;
+  esac
+}
+
+cmd_message() {
+  require_config; ensure_state
+  local uid; uid=$(cfg user_id)
+  case "${1:-}" in
+    send)
+      local rec="${2:-}" msg="${3:-}"
+      [[ -n "$rec" && -n "$msg" ]] || err "Usage: hongniang message send <recommendation_id> \"<message>\""
+      local payload
+      payload=$(jq -n --arg u "$uid" --arg r "$rec" --arg m "$msg" \
+        '{user_id:$u, recommendation_id:($r|tonumber), message:$m}')
+      api POST "${API_BASE}/messages" "$payload"
+      ;;
+    inbox) api GET "${API_BASE}/messages/${uid}" ;;
+    read)
+      local mid="${2:-}"
+      [[ -n "$mid" ]] || err "Usage: hongniang message read <message_id>"
+      local payload
+      payload=$(jq -n --arg u "$uid" '{user_id:$u}')
+      api POST "${API_BASE}/messages/${mid}/read" "$payload"
+      ;;
+    *) err "Usage: hongniang message <send|inbox|read> [args]" ;;
+  esac
+}
+
+cmd_feedback() {
+  require_config; ensure_state
+  local uid; uid=$(cfg user_id)
+  case "${1:-}" in
+    submit)
+      local rec="${2:-}" data="${3:-}"
+      [[ -n "$rec" && -n "$data" ]] || err "Usage: hongniang feedback submit <recommendation_id> '<json>'"
+      require_json "$data"
+      local payload
+      payload=$(echo "$data" | jq --arg u "$uid" --arg r "$rec" \
+        '. + {user_id:$u, recommendation_id:($r|tonumber)}')
+      api POST "${API_BASE}/feedback" "$payload" >/dev/null
+      update_state --arg r "$rec" '.feedback = ((.feedback + [$r]) | unique)'
+      echo "Feedback recorded for rec ${rec}."
+      ;;
+    list) api GET "${API_BASE}/feedback/${uid}" ;;
+    *) err "Usage: hongniang feedback <submit|list> [args]" ;;
+  esac
+}
+
+cmd_pause() {
+  require_config
+  local uid; uid=$(cfg user_id)
+  case "${1:-}" in
+    on)
+      local reason="${2:-}" payload
+      payload=$(jq -n --arg r "$reason" '{status:"paused", reason:$r}')
+      api POST "${API_BASE}/profile/${uid}/pause" "$payload"
+      ;;
+    off)    api POST "${API_BASE}/profile/${uid}/resume" '{}' ;;
+    status) api GET "${API_BASE}/profile/${uid}/pause" ;;
+    *) err "Usage: hongniang pause <on|off|status> [reason]" ;;
+  esac
+}
+
+# 深度合并：object 递归合并；纯字符串数组取并集（增量加标签不丢旧值）；
+# 其他数组（如 age_range 数字对）整体替换。删除元素请用 profile set 全量替换。
+JQ_DEEPMERGE='
+  def dm(a; b):
+    if (a|type) == "object" and (b|type) == "object" then
+      reduce (((a|keys) + (b|keys)) | unique | .[]) as $k ({}; .[$k] = dm(a[$k]; b[$k]))
+    elif (a|type) == "array" and (b|type) == "array" and ((a + b) | all(type == "string")) then
+      (a + b) | unique
+    elif b == null then a
+    else b end;
+'
+
+ensure_cache() {
+  if [[ ! -f "$CACHE" ]]; then
+    local uid remote
+    uid=$(cfg user_id)
+    remote=$(api GET "${API_BASE}/profile/${uid}")
+    echo "$remote" | jq '{summary: .summary, preferences: .preferences}' > "$CACHE"
+    chmod 600 "$CACHE"
+  fi
+}
+
+cmd_profile() {
+  require_config
+  local uid; uid=$(cfg user_id)
+  case "${1:-}" in
+    get)
+      local res; res=$(api GET "${API_BASE}/profile/${uid}")
+      echo "$res" | jq '{summary: .summary, preferences: .preferences}' > "$CACHE" 2>/dev/null || true
+      chmod 600 "$CACHE" 2>/dev/null || true
+      echo "$res"
+      ;;
+    update)
+      local new="${2:-}"
+      [[ -n "$new" ]] || err "Usage: hongniang profile update '<json>'"
+      if [[ -f "$new" ]]; then new=$(cat "$new"); fi
+      require_json "$new"
+      ensure_cache
+      local merged
+      merged=$(jq -n --argjson cache "$(cat "$CACHE")" --argjson new "$new" \
+        "${JQ_DEEPMERGE} dm(\$cache; \$new)")
+      api PATCH "${API_BASE}/profile/${uid}" "$merged" >/dev/null
+      echo "$merged" > "$CACHE"
+      chmod 600 "$CACHE"
+      echo "Profile updated (merged)."
+      ;;
+    set)
+      local full="${2:-}"
+      [[ -n "$full" ]] || err "Usage: hongniang profile set '<full_json>'  (全量替换，用于删除数组元素等)"
+      if [[ -f "$full" ]]; then full=$(cat "$full"); fi
+      require_json "$full"
+      api PATCH "${API_BASE}/profile/${uid}" "$full" >/dev/null
+      echo "$full" | jq . > "$CACHE"
+      chmod 600 "$CACHE"
+      echo "Profile replaced."
+      ;;
+    cache) [[ -f "$CACHE" ]] && cat "$CACHE" || echo '{}' ;;
+    delete)
+      api DELETE "${API_BASE}/profile/${uid}" >/dev/null
+      rm -f "$CONFIG" "$CACHE" "$STATE"
+      echo "Profile deleted on server. All local files removed."
+      ;;
+    *) err "Usage: hongniang profile <get|update|set|cache|delete> [json]" ;;
+  esac
+}
+
+cmd_status() {
+  migrate_config
+  if [[ ! -f "$CONFIG" ]]; then
+    echo '{"registered": false}'
+    return 0
+  fi
+  ensure_state
+  jq -n \
+    --arg uid "$(cfg user_id)" \
+    --arg backend "$(cfg backend_url)" \
+    --arg ctype "$(jq -r '.contact.type // ""' "$CONFIG")" \
+    --argjson contact_set "$(jq '(.contact.value // "") != ""' "$CONFIG")" \
+    --argjson last_sync "$(jq '.last_sync // 0' "$STATE")" \
+    --argjson has_cache "$([[ -f "$CACHE" ]] && echo true || echo false)" \
+    '{registered: true, user_id: $uid, backend: $backend,
+      contact_set: $contact_set, contact_type: $ctype,
+      last_sync: $last_sync, profile_cached: $has_cache}'
+}
+
+cmd_help() {
+  cat <<'EOF'
+hongniang — 红娘 skill 统一 CLI
+
+  register '<json>' [backend_url]        注册（json 也可为文件路径或 - 读 stdin）
+  status                                 本地状态概览（是否注册、联系方式是否已设置）
+  sync                                   拉取全部最新数据 + 与上次快照对比，输出变化摘要
+  contact set <type> <value>             设置联系方式（只存本地）
+  contact get                            查看联系方式
+  filter <rec_id> <shown|suppressed> [rank] [reason]
+                                         回传红娘筛选判断（展示给用户之前必须先做）
+  respond <accept|reject> <rec_id> [reason]
+                                         回应推荐（要求该推荐已有 filter 记录）
+  exchange submit <match_id> [contact]   提交联系方式（默认读本地 contact）
+  exchange get <match_id>                获取对方联系方式
+  message send <rec_id> "<msg>"          传话给对方
+  message inbox                          查看收到的传话
+  message read <msg_id>                  标记已读
+  feedback submit <rec_id> '<json>'      约会后反馈 {"outcome":"chatting|met|dating|ended","rating":1-5,"comment":"..."}
+  feedback list                          查看已提交反馈
+  pause <on|off|status> [reason]         暂停/恢复匹配
+  profile get                            查看档案（同时刷新本地缓存）
+  profile update '<json>'                增量更新（object 深合并，字符串数组并集，其他数组替换）
+  profile set '<full_json>'              全量替换（需要删除数组元素时用这个）
+  profile cache                          查看本地缓存的档案
+  profile delete                         注销并删除所有本地数据
+EOF
+}
+
+# ---------- 分发 ----------
+
+CMD="${1:-help}"
+shift || true
+case "$CMD" in
+  register) cmd_register "$@" ;;
+  contact)  cmd_contact "$@" ;;
+  sync)     cmd_sync "$@" ;;
+  filter)   cmd_filter "$@" ;;
+  respond)  cmd_respond "$@" ;;
+  exchange) cmd_exchange "$@" ;;
+  message)  cmd_message "$@" ;;
+  feedback) cmd_feedback "$@" ;;
+  pause)    cmd_pause "$@" ;;
+  profile)  cmd_profile "$@" ;;
+  status)   cmd_status "$@" ;;
+  help|-h|--help) cmd_help ;;
+  *) err "Unknown command: $CMD (run 'hongniang help')" ;;
+esac
