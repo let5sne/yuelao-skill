@@ -64,6 +64,7 @@ Created by [@zwbao](https://github.com/zwbao)
 判断力归红娘（LLM），时序和状态归代码：
 
 - **一个 CLI 统一入口。** 所有后端交互走 `scripts/hongniang`，配置、网络、状态逻辑集中管理。
+- **故障不伪装成"没数据"。** `sync` 的每类查询单独记录成败，失败时输出 `partial: true` 和 `errors`，红娘会如实说"后台连不上"，而不是"暂时没有新推荐"。
 - **本地状态快照。** CLI 记住上次见过的推荐状态、已读消息、筛选记录。`hongniang sync` 一条命令拉取全量数据并直接输出"发生了什么变化"——红娘每次打开就知道有什么新消息，不靠猜。
 - **流程不变量由代码强制。** "红娘先筛选、再展示给用户"不是口头约定：没有筛选记录的推荐无法直接回应。
 - **档案增量更新不丢数据。** 字符串数组（爱好/标签/dealbreaker）自动取并集，渐进式补充档案不会覆盖旧信息。
@@ -85,6 +86,14 @@ git clone https://github.com/zwbao/hongniang-skill.git ~/.claude/skills/hongnian
 ### 依赖
 
 - `curl` 和 `jq`
+
+### 开发
+
+```bash
+./tests/run-tests.sh
+```
+
+39 项测试，只依赖 bash + jq，不联网。覆盖档案合并语义、`sync` 的 diff 与快照更新、响应解包、ID 类型处理，以及"先筛后展"不变量。
 
 ---
 

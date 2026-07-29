@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 红娘 CLI v0.2 — 统一入口
+# 红娘 CLI v0.3 — 统一入口
 #
 # 所有后端交互和本地状态管理都在这一个脚本里。
 # 本地文件（默认 ~/.hongniang/，可用 HONGNIANG_HOME 覆盖）：
@@ -95,6 +95,10 @@ api() { # api METHOD PATH [JSON_DATA]
 
 require_json() { echo "$1" | jq empty >/dev/null 2>&1 || err "Invalid JSON: $1"; }
 
+# ID 可能是自增整数也可能是 UUID：能转数字就按数字发，否则原样按字符串发。
+# （sync 内部一律按字符串比较，这里只影响出网 payload 的类型。）
+JQ_ID='def as_id: . as $s | try ($s | tonumber) catch $s;'
+
 # ---------- 命令 ----------
 
 cmd_register() {
@@ -150,14 +154,34 @@ cmd_sync() {
   require_config; ensure_state
   local uid; uid=$(cfg user_id)
 
+  # 每类查询单独记录成败。网络故障不能伪装成"没有数据"——否则红娘会跟用户说
+  # "暂时没新进展"，而实际上是后端不可用。
+  local errors='[]' recs_ok=1 inbox_ok=1
   local recs_raw inbox_raw pause_raw
-  recs_raw=$(api GET "${API_BASE}/recommendations/${uid}") || recs_raw='[]'
-  inbox_raw=$(api GET "${API_BASE}/messages/${uid}" 2>/dev/null) || inbox_raw='[]'
-  pause_raw=$(api GET "${API_BASE}/profile/${uid}/pause" 2>/dev/null) || pause_raw='{}'
+  recs_raw=$(api GET "${API_BASE}/recommendations/${uid}" 2>/dev/null) || {
+    recs_raw='[]'; recs_ok=0
+    errors=$(echo "$errors" | jq '. + ["recommendations: 拉取失败"]')
+  }
+  inbox_raw=$(api GET "${API_BASE}/messages/${uid}" 2>/dev/null) || {
+    inbox_raw='[]'; inbox_ok=0
+    errors=$(echo "$errors" | jq '. + ["messages: 拉取失败"]')
+  }
+  pause_raw=$(api GET "${API_BASE}/profile/${uid}/pause" 2>/dev/null) || {
+    pause_raw='{}'
+    errors=$(echo "$errors" | jq '. + ["pause: 拉取失败"]')
+  }
 
+  # 后端可能返回裸数组，也可能包一层 {recommendations:[...]}。
+  # 注意不能写 (.recommendations // .)——对数组取字符串 key 会直接报错而非走 //。
   local recs inbox
-  recs=$(echo "$recs_raw" | jq '(.recommendations // .) | if type=="array" then . else [] end')
-  inbox=$(echo "$inbox_raw" | jq '(.messages // .) | if type=="array" then . else [] end')
+  recs=$(echo "$recs_raw" | jq '
+    if type=="array" then .
+    elif type=="object" and (.recommendations|type)=="array" then .recommendations
+    else [] end')
+  inbox=$(echo "$inbox_raw" | jq '
+    if type=="array" then .
+    elif type=="object" and (.messages|type)=="array" then .messages
+    else [] end')
   echo "$pause_raw" | jq -e 'type=="object"' >/dev/null 2>&1 || pause_raw='{}'
 
   # 对"已提交联系方式但还没拿到对方的"匹配，自动查一次交换进度
@@ -186,11 +210,14 @@ cmd_sync() {
     --argjson seen "$(jq '.seen_messages' "$STATE")" \
     --argjson filters "$(jq '.filters' "$STATE")" \
     --argjson exch "$(jq '.exchanges' "$STATE")" \
-    --argjson fb "$(jq '.feedback' "$STATE")" '
+    --argjson fb "$(jq '.feedback' "$STATE")" \
+    --argjson errors "$errors" '
     def rid: ((.id // .recommendation_id // "") | tostring);
     {
       synced_at: (now | floor),
       paused: ($pause.status // "active"),
+      partial: (($errors | length) > 0),
+      errors: $errors,
       changes: {
         new_recommendations: [ $recs[] | select($old[rid] == null) | rid ],
         status_changes: [ $recs[] | rid as $r
@@ -212,11 +239,17 @@ cmd_sync() {
         | {rec_id: $r, match_id: $m, days_since_contact: $d} ]
     }'
 
-  # 更新快照
-  update_state --argjson recs "$recs" --argjson inbox "$inbox" '
+  # 更新快照。只覆盖拉取成功的部分：如果 recommendations 拉取失败而这里照样把
+  # .recs 写成 {}，下次 sync 成功时全部推荐都会被当成"新推荐"重报一遍。
+  update_state --argjson recs "$recs" --argjson inbox "$inbox" \
+               --argjson recs_ok "$recs_ok" --argjson inbox_ok "$inbox_ok" '
     def rid: ((.id // .recommendation_id // "") | tostring);
-    .recs = ($recs | map({key: rid, value: (.status // "unknown")}) | from_entries)
-    | .seen_messages = ((.seen_messages + ($inbox | map(.id | tostring))) | unique)
+    (if $recs_ok == 1
+       then .recs = ($recs | map({key: rid, value: (.status // "unknown")}) | from_entries)
+       else . end)
+    | (if $inbox_ok == 1
+         then .seen_messages = ((.seen_messages + ($inbox | map(.id | tostring))) | unique)
+         else . end)
     | .last_sync = (now | floor)'
 }
 
@@ -250,13 +283,13 @@ cmd_respond() {
   local verdict
   verdict=$(jq -r --arg id "$rec" '.filters[$id].action // empty' "$STATE")
   if [[ -z "$verdict" && "$force" -ne 1 ]]; then
-    err "推荐 ${rec} 还没有筛选记录。正确顺序是：先判断并运行 hongniang filter ${rec} <shown|suppressed> [rank] [reason]，再展示给用户，用户表态后才 respond。（确需跳过：追加 --force）"
+    err "推荐 ${rec} 还没有筛选记录，不能直接回应。正确顺序：先运行 hongniang filter ${rec} <shown|suppressed> [rank] [reason] 回传你的判断，再展示给用户，用户亲口表态后才 respond。"
   fi
 
   local uid payload
   uid=$(cfg user_id)
   payload=$(jq -n --arg u "$uid" --arg r "$rec" --arg a "$action" --arg rs "$reason" \
-    '{user_id:$u, recommendation_id:($r|tonumber), response:$a, reason:$rs}')
+    "${JQ_ID}"' {user_id:$u, recommendation_id:($r|as_id), response:$a, reason:$rs}')
   api POST "${API_BASE}/response" "$payload"
   echo "Response recorded: ${action} (rec ${rec})"
 }
@@ -307,7 +340,7 @@ cmd_message() {
       [[ -n "$rec" && -n "$msg" ]] || err "Usage: hongniang message send <recommendation_id> \"<message>\""
       local payload
       payload=$(jq -n --arg u "$uid" --arg r "$rec" --arg m "$msg" \
-        '{user_id:$u, recommendation_id:($r|tonumber), message:$m}')
+        "${JQ_ID}"' {user_id:$u, recommendation_id:($r|as_id), message:$m}')
       api POST "${API_BASE}/messages" "$payload"
       ;;
     inbox) api GET "${API_BASE}/messages/${uid}" ;;
@@ -332,7 +365,7 @@ cmd_feedback() {
       require_json "$data"
       local payload
       payload=$(echo "$data" | jq --arg u "$uid" --arg r "$rec" \
-        '. + {user_id:$u, recommendation_id:($r|tonumber)}')
+        "${JQ_ID}"' . + {user_id:$u, recommendation_id:($r|as_id)}')
       api POST "${API_BASE}/feedback" "$payload" >/dev/null
       update_state --arg r "$rec" '.feedback = ((.feedback + [$r]) | unique)'
       echo "Feedback recorded for rec ${rec}."
@@ -357,14 +390,15 @@ cmd_pause() {
   esac
 }
 
-# 深度合并：object 递归合并；纯字符串数组取并集（增量加标签不丢旧值）；
+# 深度合并：object 递归合并；纯字符串数组取并集，保留原有顺序、新值追加在后
+# （不能用 unique——它会重排，把用户表达的先后强调顺序打乱）；
 # 其他数组（如 age_range 数字对）整体替换。删除元素请用 profile set 全量替换。
 JQ_DEEPMERGE='
   def dm(a; b):
     if (a|type) == "object" and (b|type) == "object" then
       reduce (((a|keys) + (b|keys)) | unique | .[]) as $k ({}; .[$k] = dm(a[$k]; b[$k]))
     elif (a|type) == "array" and (b|type) == "array" and ((a + b) | all(type == "string")) then
-      (a + b) | unique
+      reduce (a + b)[] as $x ([]; if index($x) then . else . + [$x] end)
     elif b == null then a
     else b end;
 '
@@ -454,7 +488,8 @@ hongniang — 红娘 skill 统一 CLI
   filter <rec_id> <shown|suppressed> [rank] [reason]
                                          回传红娘筛选判断（展示给用户之前必须先做）
   respond <accept|reject> <rec_id> [reason]
-                                         回应推荐（要求该推荐已有 filter 记录）
+                                         回应推荐（要求该推荐已有 filter 记录；
+                                         --force 仅用于本地状态丢失后的人工修复）
   exchange submit <match_id> [contact]   提交联系方式（默认读本地 contact）
   exchange get <match_id>                获取对方联系方式
   message send <rec_id> "<msg>"          传话给对方
