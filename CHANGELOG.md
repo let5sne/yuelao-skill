@@ -2,13 +2,33 @@
 
 > 版本号说明：git 历史中有一个 2026-04 的 commit 自称 "v0.3"，但当时的 metadata 与
 > 实际发布版本是 0.1；随后 0.2 才是第一个统一 CLI 的版本。此处以 SKILL.md 的
-> `metadata.version` 为准，当前为 **0.3**。
+> `metadata.version` 为准，当前为 **0.4**。
+>
+> **命名说明：** 项目在 0.4 改名为「月老 / yuelao」。0.3 及更早的条目保留当时的名字
+> （`hongniang`），因为它们描述的是当时的事实——改掉会让历史记录与 git 提交对不上。
+
+## 0.4 (2026-07-30) — 改名为月老
+
+项目改名 `hongniang` → `yuelao`（月老），与已上线的服务地址
+`https://yuelao.ciyuanlife.cn` 统一。
+
+**破坏性变更**（改名时线上库为空、本机无凭证，所以没有迁移负担）：
+
+- API 路径 `/api/v1/hongniang/*` → `/api/v1/yuelao/*`
+- 客户端本地状态目录 `~/.hongniang/` → `~/.yuelao/`，环境变量 `HONGNIANG_HOME` → `YUELAO_HOME`
+- CLI 改名 `scripts/hongniang` → `scripts/yuelao`
+- 服务端环境变量 `HONGNIANG_ADMIN_TOKEN` → `YUELAO_ADMIN_TOKEN`、
+  `HONGNIANG_DB` → `YUELAO_DB`、`HONGNIANG_DISABLE_RATE_LIMIT` → `YUELAO_DISABLE_RATE_LIMIT`
+- 线上环境：systemd 单元、Docker 容器与卷、数据库名、`/opt` 目录、`/etc` 配置全部重命名
+
+**注意：** 旧客户端（`~/.hongniang/` + 旧 API 路径）与新服务端不兼容。由于当时无真实用户，
+未提供迁移脚本；如果你手上有旧版本，重新 `register` 即可。
 
 ## 0.3 (2026-07-29)
 
 ### 修复
 
-- **`sync` 把后端故障静默降级为"没有数据"。** 三个查询（recommendations / messages / pause）失败后都降级成空值，红娘无法区分"确实没新进展"和"服务不可用"，会对用户说"暂时没有新推荐"。现在 sync 输出新增 `partial` 与 `errors` 字段，SKILL.md 明确要求这种情况如实告知用户。
+- **`sync` 把后端故障静默降级为"没有数据"。** 三个查询（recommendations / messages / pause）失败后都降级成空值，月老无法区分"确实没新进展"和"服务不可用"，会对用户说"暂时没有新推荐"。现在 sync 输出新增 `partial` 与 `errors` 字段，SKILL.md 明确要求这种情况如实告知用户。
 - **拉取失败会清空本地快照。** 上一条的连带后果：`recommendations` 拉取失败降级成 `[]` 后，函数末尾照样用它覆盖 `state.recs`，导致下一次成功的 sync 把全部推荐都当成"新推荐"重报一遍。现在只覆盖拉取成功的部分。
 - **裸数组响应会让 sync 崩溃。** `(.recommendations // .)` 对数组取字符串 key 时 jq 直接报错而非走 `//`，后端返回裸数组（或失败降级成 `[]`）时整个 sync 退出码 5。改为显式判类型。
 - **档案合并会打乱数组顺序。** 字符串数组并集用了 `unique`，它顺带排序——`["理性","安静"]` 增量加"幽默"会变成 `["安静","幽默","理性"]`。爱好和 dealbreaker 的先后隐含用户的强调程度，且每次更新都重排会让档案无意义地反复变动。改为保序去重。
@@ -30,7 +50,7 @@
 
 - **10 个脚本合并为一个 `scripts/hongniang` CLI**（子命令式），配置读取、网络封装、状态管理不再各自重复。旧脚本全部移除，SKILL.md 同步更新。
 - **新增本地状态快照** `~/.hongniang/state.json`：记录上次同步的推荐状态、已见消息、筛选记录、联系方式交换进度、已提交反馈。
-- **新增 `hongniang sync`**：一条命令聚合拉取推荐/收件箱/暂停状态/交换进度，与快照 diff 后输出结构化变化摘要（`changes.new_recommendations` / `status_changes` / `new_messages` / `contacts_received`、`needs_filter`、`followups_due`、`paused`）。红娘开场前只需跑这一条命令；v0.1 中"跟上次状态对比"的指令此前没有实现基础，现在由代码完成。
+- **新增 `hongniang sync`**：一条命令聚合拉取推荐/收件箱/暂停状态/交换进度，与快照 diff 后输出结构化变化摘要（`changes.new_recommendations` / `status_changes` / `new_messages` / `contacts_received`、`needs_filter`、`followups_due`、`paused`）。月老开场前只需跑这一条命令；v0.1 中"跟上次状态对比"的指令此前没有实现基础，现在由代码完成。
 - **"先筛后展"改为代码强制**：`respond` 拒绝没有本地 filter 记录的推荐（可用 `--force` 显式绕过）。
 
 ### 修复

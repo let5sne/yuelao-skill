@@ -2,21 +2,21 @@
 # 红娘 CLI v0.3 — 统一入口
 #
 # 所有后端交互和本地状态管理都在这一个脚本里。
-# 本地文件（默认 ~/.hongniang/，可用 HONGNIANG_HOME 覆盖）：
+# 本地文件（默认 ~/.yuelao/，可用 YUELAO_HOME 覆盖）：
 #   config.json         user_id / api_token / backend_url / contact（联系方式只存本地）
 #   state.json          上次同步的推荐状态快照、已见消息、筛选记录、交换记录、反馈记录
 #   profile-cache.json  档案本地缓存（增量更新时深度合并用）
 #
-# 用法: hongniang <command> [args]，运行 hongniang help 查看全部命令。
+# 用法: yuelao <command> [args]，运行 yuelao help 查看全部命令。
 
 set -euo pipefail
 
-HN_DIR="${HONGNIANG_HOME:-$HOME/.hongniang}"
+HN_DIR="${YUELAO_HOME:-$HOME/.yuelao}"
 CONFIG="$HN_DIR/config.json"
 STATE="$HN_DIR/state.json"
 CACHE="$HN_DIR/profile-cache.json"
 DEFAULT_BACKEND="http://43.163.116.103:8010"
-API_BASE="/api/v1/hongniang"
+API_BASE="/api/v1/yuelao"
 
 err() { echo "ERROR: $*" >&2; exit 1; }
 
@@ -49,7 +49,7 @@ cfg() { jq -r ".$1 // empty" "$CONFIG"; }
 
 require_config() {
   migrate_config
-  [[ -f "$CONFIG" ]] || err "Not registered. Run: hongniang register '<profile_json>'"
+  [[ -f "$CONFIG" ]] || err "Not registered. Run: yuelao register '<profile_json>'"
 }
 
 # ---------- 本地状态 ----------
@@ -103,9 +103,9 @@ JQ_ID='def as_id: . as $s | try ($s | tonumber) catch $s;'
 
 cmd_register() {
   local input="${1:-}" backend="${2:-$DEFAULT_BACKEND}"
-  [[ -n "$input" ]] || err "Usage: hongniang register '<json>' [backend_url]  (or '-' for stdin)"
+  [[ -n "$input" ]] || err "Usage: yuelao register '<json>' [backend_url]  (or '-' for stdin)"
   migrate_config
-  [[ -f "$CONFIG" ]] && err "Already registered ($CONFIG exists). Use 'hongniang profile update' instead."
+  [[ -f "$CONFIG" ]] && err "Already registered ($CONFIG exists). Use 'yuelao profile update' instead."
   local json
   if [[ "$input" == "-" ]]; then json=$(cat)
   elif [[ -f "$input" ]]; then json=$(cat "$input")
@@ -131,7 +131,7 @@ cmd_register() {
   chmod 600 "$CACHE"
   ensure_state
   echo "Registered. user_id: $uid"
-  echo "Next: save contact info locally with: hongniang contact set wechat <微信号>"
+  echo "Next: save contact info locally with: yuelao contact set wechat <微信号>"
 }
 
 cmd_contact() {
@@ -139,14 +139,14 @@ cmd_contact() {
   case "${1:-}" in
     set)
       local type="${2:-}" value="${3:-}"
-      [[ -n "$type" && -n "$value" ]] || err "Usage: hongniang contact set <type> <value>  e.g. contact set wechat abc123"
+      [[ -n "$type" && -n "$value" ]] || err "Usage: yuelao contact set <type> <value>  e.g. contact set wechat abc123"
       local tmp; tmp=$(mktemp)
       jq --arg t "$type" --arg v "$value" '.contact = {type:$t, value:$v}' "$CONFIG" > "$tmp" && mv "$tmp" "$CONFIG"
       chmod 600 "$CONFIG"
       echo "Contact saved locally (${type}). It is only sent to the server when you explicitly exchange after a mutual match."
       ;;
     get) jq '.contact' "$CONFIG" ;;
-    *) err "Usage: hongniang contact <set|get> [type value]" ;;
+    *) err "Usage: yuelao contact <set|get> [type value]" ;;
   esac
 }
 
@@ -256,7 +256,7 @@ cmd_sync() {
 cmd_filter() {
   require_config; ensure_state
   local rec="${1:-}" action="${2:-}" rank="${3:-}" reason="${4:-}"
-  [[ -n "$rec" && -n "$action" ]] || err "Usage: hongniang filter <recommendation_id> <shown|suppressed> [rank] [reason]"
+  [[ -n "$rec" && -n "$action" ]] || err "Usage: yuelao filter <recommendation_id> <shown|suppressed> [rank] [reason]"
   [[ "$action" == "shown" || "$action" == "suppressed" ]] || err "Action must be 'shown' or 'suppressed'"
   local uid payload
   uid=$(cfg user_id)
@@ -273,7 +273,7 @@ cmd_filter() {
 cmd_respond() {
   require_config; ensure_state
   local action="${1:-}" rec="${2:-}" reason="" force=0 arg
-  shift 2 2>/dev/null || err "Usage: hongniang respond <accept|reject> <recommendation_id> [reason] [--force]"
+  shift 2 2>/dev/null || err "Usage: yuelao respond <accept|reject> <recommendation_id> [reason] [--force]"
   for arg in "$@"; do
     if [[ "$arg" == "--force" ]]; then force=1; else reason="$arg"; fi
   done
@@ -283,7 +283,7 @@ cmd_respond() {
   local verdict
   verdict=$(jq -r --arg id "$rec" '.filters[$id].action // empty' "$STATE")
   if [[ -z "$verdict" && "$force" -ne 1 ]]; then
-    err "推荐 ${rec} 还没有筛选记录，不能直接回应。正确顺序：先运行 hongniang filter ${rec} <shown|suppressed> [rank] [reason] 回传你的判断，再展示给用户，用户亲口表态后才 respond。"
+    err "推荐 ${rec} 还没有筛选记录，不能直接回应。正确顺序：先运行 yuelao filter ${rec} <shown|suppressed> [rank] [reason] 回传你的判断，再展示给用户，用户亲口表态后才 respond。"
   fi
 
   local uid payload
@@ -297,7 +297,7 @@ cmd_respond() {
 cmd_exchange() {
   require_config; ensure_state
   local action="${1:-}" mid="${2:-}"
-  [[ -n "$action" && -n "$mid" ]] || err "Usage: hongniang exchange <submit|get> <match_id> [contact]"
+  [[ -n "$action" && -n "$mid" ]] || err "Usage: yuelao exchange <submit|get> <match_id> [contact]"
   local uid; uid=$(cfg user_id)
   case "$action" in
     submit)
@@ -306,7 +306,7 @@ cmd_exchange() {
         local ct cv
         ct=$(jq -r '.contact.type // empty' "$CONFIG")
         cv=$(jq -r '.contact.value // empty' "$CONFIG")
-        [[ -n "$cv" ]] || err "No contact info. Run: hongniang contact set wechat <微信号>  (or pass contact as argument)"
+        [[ -n "$cv" ]] || err "No contact info. Run: yuelao contact set wechat <微信号>  (or pass contact as argument)"
         contact="${ct}:${cv}"
       fi
       local payload
@@ -327,7 +327,7 @@ cmd_exchange() {
         echo "Waiting for the other party to submit their contact info."
       fi
       ;;
-    *) err "Usage: hongniang exchange <submit|get> <match_id> [contact]" ;;
+    *) err "Usage: yuelao exchange <submit|get> <match_id> [contact]" ;;
   esac
 }
 
@@ -337,7 +337,7 @@ cmd_message() {
   case "${1:-}" in
     send)
       local rec="${2:-}" msg="${3:-}"
-      [[ -n "$rec" && -n "$msg" ]] || err "Usage: hongniang message send <recommendation_id> \"<message>\""
+      [[ -n "$rec" && -n "$msg" ]] || err "Usage: yuelao message send <recommendation_id> \"<message>\""
       local payload
       payload=$(jq -n --arg u "$uid" --arg r "$rec" --arg m "$msg" \
         "${JQ_ID}"' {user_id:$u, recommendation_id:($r|as_id), message:$m}')
@@ -346,12 +346,12 @@ cmd_message() {
     inbox) api GET "${API_BASE}/messages/${uid}" ;;
     read)
       local mid="${2:-}"
-      [[ -n "$mid" ]] || err "Usage: hongniang message read <message_id>"
+      [[ -n "$mid" ]] || err "Usage: yuelao message read <message_id>"
       local payload
       payload=$(jq -n --arg u "$uid" '{user_id:$u}')
       api POST "${API_BASE}/messages/${mid}/read" "$payload"
       ;;
-    *) err "Usage: hongniang message <send|inbox|read> [args]" ;;
+    *) err "Usage: yuelao message <send|inbox|read> [args]" ;;
   esac
 }
 
@@ -361,7 +361,7 @@ cmd_feedback() {
   case "${1:-}" in
     submit)
       local rec="${2:-}" data="${3:-}"
-      [[ -n "$rec" && -n "$data" ]] || err "Usage: hongniang feedback submit <recommendation_id> '<json>'"
+      [[ -n "$rec" && -n "$data" ]] || err "Usage: yuelao feedback submit <recommendation_id> '<json>'"
       require_json "$data"
       local payload
       payload=$(echo "$data" | jq --arg u "$uid" --arg r "$rec" \
@@ -371,7 +371,7 @@ cmd_feedback() {
       echo "Feedback recorded for rec ${rec}."
       ;;
     list) api GET "${API_BASE}/feedback/${uid}" ;;
-    *) err "Usage: hongniang feedback <submit|list> [args]" ;;
+    *) err "Usage: yuelao feedback <submit|list> [args]" ;;
   esac
 }
 
@@ -386,7 +386,7 @@ cmd_pause() {
       ;;
     off)    api POST "${API_BASE}/profile/${uid}/resume" '{}' ;;
     status) api GET "${API_BASE}/profile/${uid}/pause" ;;
-    *) err "Usage: hongniang pause <on|off|status> [reason]" ;;
+    *) err "Usage: yuelao pause <on|off|status> [reason]" ;;
   esac
 }
 
@@ -425,7 +425,7 @@ cmd_profile() {
       ;;
     update)
       local new="${2:-}"
-      [[ -n "$new" ]] || err "Usage: hongniang profile update '<json>'"
+      [[ -n "$new" ]] || err "Usage: yuelao profile update '<json>'"
       if [[ -f "$new" ]]; then new=$(cat "$new"); fi
       require_json "$new"
       ensure_cache
@@ -439,7 +439,7 @@ cmd_profile() {
       ;;
     set)
       local full="${2:-}"
-      [[ -n "$full" ]] || err "Usage: hongniang profile set '<full_json>'  (全量替换，用于删除数组元素等)"
+      [[ -n "$full" ]] || err "Usage: yuelao profile set '<full_json>'  (全量替换，用于删除数组元素等)"
       if [[ -f "$full" ]]; then full=$(cat "$full"); fi
       require_json "$full"
       api PATCH "${API_BASE}/profile/${uid}" "$full" >/dev/null
@@ -453,7 +453,7 @@ cmd_profile() {
       rm -f "$CONFIG" "$CACHE" "$STATE"
       echo "Profile deleted on server. All local files removed."
       ;;
-    *) err "Usage: hongniang profile <get|update|set|cache|delete> [json]" ;;
+    *) err "Usage: yuelao profile <get|update|set|cache|delete> [json]" ;;
   esac
 }
 
@@ -478,7 +478,7 @@ cmd_status() {
 
 cmd_help() {
   cat <<'EOF'
-hongniang — 红娘 skill 统一 CLI
+yuelao — 红娘 skill 统一 CLI
 
   register '<json>' [backend_url]        注册（json 也可为文件路径或 - 读 stdin）
   status                                 本地状态概览（是否注册、联系方式是否已设置）
@@ -523,5 +523,5 @@ case "$CMD" in
   profile)  cmd_profile "$@" ;;
   status)   cmd_status "$@" ;;
   help|-h|--help) cmd_help ;;
-  *) err "Unknown command: $CMD (run 'hongniang help')" ;;
+  *) err "Unknown command: $CMD (run 'yuelao help')" ;;
 esac

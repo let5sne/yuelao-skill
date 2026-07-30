@@ -10,7 +10,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CLI="$SCRIPT_DIR/../scripts/hongniang"
+CLI="$SCRIPT_DIR/../scripts/yuelao"
 
 PASS=0
 FAIL=0
@@ -179,7 +179,7 @@ echo "CLI 行为（离线，隔离 HOME）"
 
 TMP_HOME=$(mktemp -d)
 trap 'rm -rf "$TMP_HOME"' EXIT
-export HONGNIANG_HOME="$TMP_HOME/.hongniang"
+export YUELAO_HOME="$TMP_HOME/.yuelao"
 
 assert_json "未注册时 status 返回 registered:false" \
   '{"registered":false}' \
@@ -199,14 +199,14 @@ assert_contains "help 列出 sync" "sync" "$out"
 assert_contains "help 列出 filter" "filter" "$out"
 
 # "先筛后展"不变量：伪造一份已注册的配置，但不给 filter 记录。
-mkdir -p "$HONGNIANG_HOME"
-cat > "$HONGNIANG_HOME/config.json" <<'JSON'
+mkdir -p "$YUELAO_HOME"
+cat > "$YUELAO_HOME/config.json" <<'JSON'
 {"user_id":"test-uid","api_token":"test-token",
  "backend_url":"http://127.0.0.1:9","contact":{"type":"","value":""}}
 JSON
-chmod 600 "$HONGNIANG_HOME/config.json"
+chmod 600 "$YUELAO_HOME/config.json"
 echo '{"recs":{},"seen_messages":[],"filters":{},"exchanges":{},"feedback":[],"last_sync":0}' \
-  > "$HONGNIANG_HOME/state.json"
+  > "$YUELAO_HOME/state.json"
 
 out=$("$CLI" respond accept 42 2>&1 || true)
 assert_contains "无 filter 记录时 respond 被拒绝" "还没有筛选记录" "$out"
@@ -218,8 +218,8 @@ else
 fi
 
 # 有 filter 记录后，不变量放行（此时才会去联网，预期网络失败）
-jq '.filters["42"]={"action":"shown","reason":"t","ts":0}' "$HONGNIANG_HOME/state.json" \
-  > "$HONGNIANG_HOME/state.tmp" && mv "$HONGNIANG_HOME/state.tmp" "$HONGNIANG_HOME/state.json"
+jq '.filters["42"]={"action":"shown","reason":"t","ts":0}' "$YUELAO_HOME/state.json" \
+  > "$YUELAO_HOME/state.tmp" && mv "$YUELAO_HOME/state.tmp" "$YUELAO_HOME/state.json"
 out=$("$CLI" respond accept 42 2>&1 || true)
 if [[ "$out" != *"还没有筛选记录"* ]]; then
   ok "有 filter 记录后不变量放行"
@@ -233,7 +233,7 @@ assert_json "contact get 读回本地值" \
   '{"type":"wechat","value":"test_wx_123"}' \
   "$("$CLI" contact get)"
 
-perm=$(ls -l "$HONGNIANG_HOME/config.json" | cut -c1-10)
+perm=$(ls -l "$YUELAO_HOME/config.json" | cut -c1-10)
 assert_eq "config.json 权限为 600" "-rw-------" "$perm"
 
 out=$("$CLI" register '{"summary":{}}' 2>&1 || true)
