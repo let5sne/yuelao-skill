@@ -28,7 +28,18 @@
 
 ---
 
-Created by [@zwbao](https://github.com/zwbao)
+## 关于这个分支
+
+客户端 skill 的原始作者是 [@zwbao](https://github.com/zwbao)（[hongniang-skill](https://github.com/zwbao/hongniang-skill)，MIT）。
+本仓库在此基础上：
+
+- **新增了完整的后端** `server/`（原项目的后端未开源）—— 两层匹配引擎、15 个 API 端点、
+  双向同意状态机、93 项服务端测试（含 IDOR / 越权 / 数据泄露的安全断言）
+- **实现了技术报告路线图里的第二层**：双塔向量交叉打分（`score = sim(A.seek,B.offer) × sim(B.seek,A.offer)`），
+  而非原文描述的档案相似度
+- **修了客户端若干 bug**：`sync` 把后端故障静默降级为"没有数据"、拉取失败清空本地快照、
+  档案合并打乱数组顺序等
+- **改名为「月老 / yuelao」**，与服务地址统一（详见 [CHANGELOG](CHANGELOG.md)）
 
 > **内测中：** 当前为小范围内测阶段，数据库中有部分测试账号，匹配到时会显示标记。
 
@@ -76,7 +87,7 @@ Created by [@zwbao](https://github.com/zwbao)
 ### Claude Code
 
 ```bash
-git clone https://github.com/zwbao/yuelao-skill.git ~/.claude/skills/yuelao
+git clone https://github.com/let5sne/yuelao-skill.git ~/.claude/skills/yuelao
 ```
 
 ### 其他支持 Agent Skills 的工具
@@ -160,6 +171,8 @@ git clone https://github.com/zwbao/yuelao-skill.git ~/.claude/skills/yuelao
 
 <div align="center">
 
-MIT License © [zwbao](https://github.com/zwbao)
+MIT License
+
+客户端原作者 [@zwbao](https://github.com/zwbao) · 后端与第二层匹配 [@let5sne](https://github.com/let5sne)
 
 </div>

@@ -12,7 +12,7 @@
 安装 skill：
 
 ```bash
-git clone https://github.com/zwbao/yuelao-skill.git ~/.claude/skills/yuelao
+git clone https://github.com/let5sne/yuelao-skill.git ~/.claude/skills/yuelao
 ```
 
 ## 第一次见月老
