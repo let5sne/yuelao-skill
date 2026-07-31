@@ -1,0 +1,560 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>月老 — 她比任何算法都更懂你</title>
+<meta name="description" content="一位 AI 婚恋顾问，住在你自己的电脑里。她通过聊天了解你，帮你筛选、传话、把关。你们的对话从不离开你的设备。">
+<meta name="color-scheme" content="light dark">
+
+<meta property="og:type" content="website">
+<meta property="og:title" content="月老 — 她比任何算法都更懂你">
+<meta property="og:description" content="因为你们的对话，从不离开你的电脑。">
+<meta property="og:url" content="https://yuelao.ciyuanlife.cn/">
+
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='25' x='2' font-size='26'>月</text></svg>">
+
+<!--
+  样式全部内联。
+  单页微站的情况下这是对的取舍：省掉一次阻塞渲染的请求，首屏直接出，
+  整页 gzip 后不到 8KB。不用 CDN 字体——中文字体动辄几 MB，而且国内
+  访问 Google Fonts 会卡首屏。用系统衬线体，零下载、立即渲染。
+-->
+<style>
+:root {
+  /* 暖纸 + 墨 + 一点朱红。朱红做了降饱和，否则在大面积留白上会刺眼 */
+  --paper:      oklch(97.5% 0.008 85);
+  --paper-deep: oklch(94.5% 0.012 82);
+  --ink:        oklch(23% 0.012 60);
+  --ink-soft:   oklch(46% 0.012 60);
+  /* 52% 而非更浅：13-14px 的小字要过 4.5:1（实测 body 5.11 / deep 4.69）。
+     再浅一档 55% 在 paper-deep 上只有 4.15——那是页脚版权和图注，
+     用户不会抱怨，但看不清就是看不清。 */
+  --ink-faint:  oklch(52% 0.010 60);
+  --accent:     oklch(52% 0.155 32);
+  --rule:       oklch(88% 0.010 72);
+
+  --serif: "Songti SC", "Noto Serif CJK SC", "Source Han Serif SC", "STSong", Georgia, serif;
+  --sans: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB",
+          "Microsoft YaHei", "Noto Sans CJK SC", system-ui, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+
+  --measure: 34rem;         /* 正文行宽上限，中文约 30 字 */
+  --gap-section: clamp(5rem, 4rem + 7vw, 10rem);
+  --ease: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper:      oklch(17% 0.012 60);
+    --paper-deep: oklch(21% 0.014 60);
+    --ink:        oklch(93% 0.008 85);
+    --ink-soft:   oklch(72% 0.010 75);
+    /* 同理，63% 是深色下第一个双达标的值（body 5.46 / deep 5.05） */
+    --ink-faint:  oklch(63% 0.010 70);
+    --accent:     oklch(68% 0.145 38);
+    --rule:       oklch(32% 0.012 60);
+  }
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: clamp(1rem, 0.96rem + 0.2vw, 1.0625rem);
+  line-height: 1.85;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* 纸的纹理：极淡的径向渐变，不用图片 */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: -1;
+  background:
+    radial-gradient(ellipse 80% 50% at 50% -10%, var(--paper-deep), transparent 70%);
+}
+
+.wrap {
+  width: 100%;
+  max-width: 46rem;
+  margin-inline: auto;
+  padding-inline: clamp(1.35rem, 5vw, 2.5rem);
+}
+
+section { padding-block: var(--gap-section); }
+
+/* ─────────── 开场 ─────────── */
+
+.hero { padding-block: clamp(5rem, 4rem + 10vh, 11rem) var(--gap-section); }
+
+.wordmark {
+  font-family: var(--serif);
+  font-size: clamp(2.1rem, 1.8rem + 1.6vw, 2.9rem);
+  font-weight: 400;
+  letter-spacing: 0.24em;
+  margin: 0 0 clamp(2.5rem, 2rem + 3vw, 4rem);
+  color: var(--ink);
+}
+.wordmark .dot { color: var(--accent); }
+
+/* 主张：衬线大字，收紧行距——这是全页唯一的"大声说话" */
+.claim {
+  font-family: var(--serif);
+  font-size: clamp(2.05rem, 1.35rem + 3.5vw, 3.55rem);
+  font-weight: 400;
+  line-height: 1.28;
+  letter-spacing: -0.005em;
+  margin: 0;
+  text-wrap: balance;
+}
+.claim .because {
+  display: block;
+  margin-top: 0.55em;
+  font-size: 0.5em;
+  line-height: 1.6;
+  color: var(--ink-soft);
+  letter-spacing: 0.01em;
+}
+.claim .because em {
+  font-style: normal;
+  color: var(--accent);
+  /* 下划线用 box-shadow 而非 border，避免影响行高 */
+  box-shadow: inset 0 -0.42em 0 color-mix(in oklab, var(--accent) 13%, transparent);
+}
+
+.standfirst {
+  margin: clamp(2.2rem, 1.8rem + 2vw, 3.2rem) 0 0;
+  max-width: var(--measure);
+  color: var(--ink-soft);
+}
+
+/* ─────────── 对照 ─────────── */
+
+.contrast {
+  border-top: 1px solid var(--rule);
+  border-bottom: 1px solid var(--rule);
+  padding-block: clamp(3.5rem, 3rem + 4vw, 5.5rem);
+}
+.contrast p {
+  font-family: var(--serif);
+  font-size: clamp(1.3rem, 1.1rem + 1vw, 1.7rem);
+  line-height: 1.7;
+  margin: 0;
+  max-width: 30rem;
+  color: var(--ink-soft);
+}
+.contrast p + p { margin-top: 1.1em; color: var(--ink); }
+.contrast strong { font-weight: 400; color: var(--accent); }
+
+/* ─────────── 三件事 ─────────── */
+
+.eyebrow {
+  font-size: 0.8125rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  margin: 0 0 3rem;
+}
+
+.steps { list-style: none; margin: 0; padding: 0; counter-reset: s; }
+
+.step {
+  counter-increment: s;
+  padding-block: clamp(2.2rem, 2rem + 1.5vw, 3rem);
+  border-top: 1px solid var(--rule);
+  display: grid;
+  grid-template-columns: 2.75rem 1fr;
+  gap: 0 1.25rem;
+  align-items: start;
+}
+.step:first-child { border-top: none; padding-top: 0; }
+
+.step::before {
+  content: counter(s);
+  font-family: var(--serif);
+  font-size: 1.6rem;
+  line-height: 1.15;
+  color: var(--accent);
+  grid-row: span 2;
+}
+
+.step h3 {
+  font-family: var(--serif);
+  font-size: clamp(1.32rem, 1.15rem + 0.85vw, 1.75rem);
+  font-weight: 400;
+  line-height: 1.45;
+  margin: 0 0 0.6rem;
+  text-wrap: balance;
+}
+.step p {
+  margin: 0;
+  max-width: var(--measure);
+  color: var(--ink-soft);
+  grid-column: 2;
+}
+.step p + p { margin-top: 0.8em; }
+
+/* 20 → 3 的可视化。不是装饰：它就是这一步要说的事 */
+figure.funnel {
+  grid-column: 2;
+  margin: 1.6rem 0 0;
+}
+.dots {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  max-width: 19rem;
+}
+.dots span {
+  inline-size: 0.66rem;
+  block-size: 0.66rem;
+  border-radius: 50%;
+  background: var(--rule);
+}
+.dots span.on { background: var(--accent); }
+figure.funnel figcaption {
+  margin-top: 0.95rem;
+  font-size: 0.875rem;
+  color: var(--ink-faint);
+}
+
+/* ─────────── 隐私 ─────────── */
+
+.privacy { background: var(--paper-deep); }
+.privacy h2 {
+  font-family: var(--serif);
+  font-size: clamp(1.7rem, 1.4rem + 1.5vw, 2.4rem);
+  font-weight: 400;
+  margin: 0 0 2.5rem;
+  line-height: 1.4;
+}
+
+.ledger { list-style: none; margin: 0 0 2.5rem; padding: 0; }
+.ledger li {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.35rem 1.5rem;
+  align-items: baseline;
+  padding-block: 1.1rem;
+  border-top: 1px solid var(--rule);
+}
+.ledger li:last-child { border-bottom: 1px solid var(--rule); }
+.ledger .what { font-weight: 500; }
+.ledger .where {
+  font-family: var(--mono);
+  font-size: 0.8125rem;
+  color: var(--accent);
+  white-space: nowrap;
+}
+.ledger .note {
+  grid-column: 1 / -1;
+  font-size: 0.9375rem;
+  color: var(--ink-soft);
+  max-width: var(--measure);
+}
+
+.caveat {
+  font-size: 0.9375rem;
+  color: var(--ink-soft);
+  max-width: var(--measure);
+  padding-left: 1rem;
+  border-left: 2px solid var(--rule);
+  margin: 0;
+}
+
+/* ─────────── 安装 ─────────── */
+
+.install h2 {
+  font-family: var(--serif);
+  font-size: clamp(1.7rem, 1.4rem + 1.5vw, 2.4rem);
+  font-weight: 400;
+  margin: 0 0 0.75rem;
+}
+.install > .wrap > p { color: var(--ink-soft); margin: 0 0 2.25rem; max-width: var(--measure); }
+
+.cmd {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  border: 1px solid var(--rule);
+  border-radius: 0.5rem;
+  background: var(--paper);
+  overflow: hidden;
+  margin-bottom: 1rem;
+}
+.cmd code {
+  font-family: var(--mono);
+  font-size: 0.8125rem;
+  line-height: 1.6;
+  padding: 0.95rem 1.1rem;
+  overflow-x: auto;
+  white-space: pre;
+  flex: 1;
+  color: var(--ink);
+}
+.cmd button {
+  font: inherit;
+  font-size: 0.8125rem;
+  font-family: var(--sans);
+  border: none;
+  border-left: 1px solid var(--rule);
+  background: transparent;
+  color: var(--ink-soft);
+  padding-inline: 1.05rem;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 160ms var(--ease), color 160ms var(--ease);
+}
+.cmd button:hover { background: var(--paper-deep); color: var(--ink); }
+.cmd button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.cmd button[data-done="1"] { color: var(--accent); }
+
+.then {
+  margin: 2.25rem 0 0;
+  font-size: 0.9375rem;
+  color: var(--ink-soft);
+}
+.then kbd {
+  font-family: var(--serif);
+  font-size: 1.05rem;
+  color: var(--accent);
+  background: none;
+  border: none;
+  padding: 0 0.15em;
+}
+
+.reqs {
+  margin: 0.9rem 0 0;
+  font-size: 0.875rem;
+  color: var(--ink-faint);
+}
+.reqs code { font-family: var(--mono); font-size: 0.9em; }
+
+/* ─────────── 页脚 ─────────── */
+
+footer {
+  border-top: 1px solid var(--rule);
+  padding-block: 3rem 4rem;
+  font-size: 0.875rem;
+  color: var(--ink-faint);
+}
+.beta {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0 0 1.5rem;
+  color: var(--ink-soft);
+}
+.beta::before {
+  content: "";
+  inline-size: 0.4rem;
+  block-size: 0.4rem;
+  border-radius: 50%;
+  background: var(--accent);
+  flex: none;
+}
+footer nav { display: flex; flex-wrap: wrap; gap: 0.5rem 1.5rem; margin-bottom: 1rem; }
+footer p { margin: 0; }
+
+a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 0.22em; }
+a:hover { text-decoration-thickness: 2px; }
+a:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
+
+/* 入场：只做一次，很轻。尊重 prefers-reduced-motion */
+@media (prefers-reduced-motion: no-preference) {
+  .rise { animation: rise 0.85s var(--ease) both; }
+  .rise:nth-child(2) { animation-delay: 0.08s; }
+  .rise:nth-child(3) { animation-delay: 0.16s; }
+  @keyframes rise {
+    from { opacity: 0; transform: translateY(0.9rem); }
+    to   { opacity: 1; transform: none; }
+  }
+}
+
+@media (max-width: 30rem) {
+  .step { grid-template-columns: 1.9rem 1fr; gap: 0 0.9rem; }
+  .step::before { font-size: 1.25rem; }
+  .ledger li { grid-template-columns: 1fr; }
+  .ledger .where { justify-self: start; }
+}
+</style>
+</head>
+<body>
+
+<main>
+
+  <section class="hero">
+    <div class="wrap">
+      <p class="wordmark rise">月老<span class="dot">.</span></p>
+      <h1 class="claim rise">
+        她比任何算法都更懂你。
+        <span class="because">因为你们的对话，<em>从不离开你的电脑</em>。</span>
+      </h1>
+      <p class="standfirst rise">
+        一位 AI 婚恋顾问，住在你自己的设备里。她跟你聊天、替你筛选、居间传话——
+        像一个真正在帮你操心的人，而不是一个推荐列表。
+      </p>
+    </div>
+  </section>
+
+  <section class="contrast">
+    <div class="wrap">
+      <p>相亲 App 让你左滑右滑，看照片，填条件——像在电商平台挑商品。</p>
+      <p><strong>月老跟你聊天。</strong></p>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <p class="eyebrow">她怎么工作</p>
+      <ol class="steps">
+
+        <li class="step">
+          <h3>她跟你聊天，不让你填表</h3>
+          <p>
+            城市、工作、下班后干什么。像朋友一样聊五分钟，你不会意识到自己在"建档"。
+            她也会问一些更难的——"一个人有趣但不稳定，另一个无聊但靠谱，你选哪个"。
+          </p>
+        </li>
+
+        <li class="step">
+          <h3>20 个候选，她只让 3 个走到你面前</h3>
+          <p>
+            后台按硬条件和向量匹配筛出候选，她再按对你的了解筛一遍。她知道档案里写不出来的事——
+            你嘴上说"学历无所谓"，但每次聊到高学历的人语气都不一样；你三次回避异地话题，
+            却没把它写进"不能接受"。
+          </p>
+          <figure class="funnel">
+            <div class="dots" role="img" aria-label="20 个候选中，只有 3 个会被展示给你">
+              <span class="on"></span><span class="on"></span><span class="on"></span>
+              <span></span><span></span><span></span><span></span><span></span>
+              <span></span><span></span><span></span><span></span><span></span>
+              <span></span><span></span><span></span><span></span><span></span>
+              <span></span><span></span>
+            </div>
+            <figcaption>被压下的不会删除，你随时可以说"把其他的也给我看看"。</figcaption>
+          </figure>
+        </li>
+
+        <li class="step">
+          <h3>想问什么，她替你去问</h3>
+          <p>
+            还没交换联系方式之前，两边的月老在中间传话。你说"帮我问问她周末干嘛"，
+            她会包装成合适的措辞发过去。话说得太冲，她帮你换个说法；
+            第一轮就问收入，她会建议你缓缓。
+          </p>
+        </li>
+
+      </ol>
+    </div>
+  </section>
+
+  <section class="privacy">
+    <div class="wrap">
+      <h2>你的话只在你这里</h2>
+
+      <ul class="ledger">
+        <li>
+          <span class="what">聊天原文</span>
+          <span class="where">你的电脑</span>
+          <span class="note">不上传。服务器没有、也不需要你们说过的每一句话。</span>
+        </li>
+        <li>
+          <span class="what">结构化画像</span>
+          <span class="where">服务器</span>
+          <span class="note">年龄、城市、性格标签这类，不含姓名——匹配引擎要用它。</span>
+        </li>
+        <li>
+          <span class="what">联系方式</span>
+          <span class="where">你的电脑 → 双方同意后交换</span>
+          <span class="note">平时只在本地。必须你和对方互相点了同意，并且你明确让她提交，才会经服务器交换给对方。</span>
+        </li>
+      </ul>
+
+      <p class="caveat">
+        说实话的部分：传话内容和她的筛选理由存在服务器上（要中转、要优化匹配）。
+        端到端加密的中转在路线图里——那之后服务器会从"承诺不看"变成"看不了"。
+        随时可以让她把你的数据全部删掉。
+      </p>
+    </div>
+  </section>
+
+  <section class="install">
+    <div class="wrap">
+      <h2>装上她</h2>
+      <p>一行命令。之后她就在你的 agent 里了。</p>
+
+      <div class="cmd">
+        <code id="install-cmd">git clone https://github.com/let5sne/yuelao-skill.git ~/.claude/skills/yuelao</code>
+        <button type="button" id="copy" aria-label="复制安装命令">复制</button>
+      </div>
+
+      <p class="reqs">需要 <code>curl</code> 和 <code>jq</code>。支持 Claude Code 及其他兼容 Agent Skills 的工具。</p>
+
+      <p class="then">然后对你的 agent 说一声 <kbd>月老</kbd>，或者"我想找对象"。</p>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <p class="beta">内测中——池子还很小，匹配到测试账号时她会明确告诉你。</p>
+    <nav>
+      <a href="https://github.com/let5sne/yuelao-skill">GitHub</a>
+      <a href="https://github.com/let5sne/yuelao-skill/blob/main/TUTORIAL.md">使用教程</a>
+      <a href="https://github.com/let5sne/yuelao-skill/blob/main/TECHNICAL-REPORT.md">技术报告</a>
+    </nav>
+    <p>MIT · 客户端原作者 <a href="https://github.com/zwbao">@zwbao</a> · 后端与匹配引擎 <a href="https://github.com/let5sne">@let5sne</a></p>
+  </div>
+</footer>
+
+<script>
+// 唯一的 JS：复制安装命令。
+// 没有 clipboard API 的环境（http 或老浏览器）退回选中文本，而不是静默失败。
+(function () {
+  var btn = document.getElementById('copy');
+  var cmd = document.getElementById('install-cmd');
+  if (!btn || !cmd) return;
+
+  btn.addEventListener('click', function () {
+    var text = cmd.textContent.trim();
+    var done = function () {
+      btn.textContent = '已复制';
+      btn.dataset.done = '1';
+      setTimeout(function () {
+        btn.textContent = '复制';
+        delete btn.dataset.done;
+      }, 2000);
+    };
+
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(text).then(done, selectFallback);
+    } else {
+      selectFallback();
+    }
+
+    function selectFallback() {
+      var range = document.createRange();
+      range.selectNodeContents(cmd);
+      var sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+      btn.textContent = '已选中';
+      setTimeout(function () { btn.textContent = '复制'; }, 2000);
+    }
+  });
+})();
+</script>
+
+</body>
+</html>
