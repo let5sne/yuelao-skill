@@ -84,11 +84,17 @@
 
 ## 安装
 
+> 仓库当前是 private，下面的命令需要你的 GitHub 账号有访问权（或改用 SSH 地址
+> `git@github.com:let5sne/yuelao-skill.git`）。
+
 ### Claude Code
 
 ```bash
 git clone https://github.com/let5sne/yuelao-skill.git ~/.claude/skills/yuelao
 ```
+
+建议目录名用 `yuelao`（SKILL.md 里的路径解析会先试这个位置）；用别的名字也能工作，
+但要多走一次 `find` 兜底。
 
 ### 其他支持 Agent Skills 的工具
 
