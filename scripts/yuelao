@@ -15,7 +15,12 @@ HN_DIR="${YUELAO_HOME:-$HOME/.yuelao}"
 CONFIG="$HN_DIR/config.json"
 STATE="$HN_DIR/state.json"
 CACHE="$HN_DIR/profile-cache.json"
-DEFAULT_BACKEND="http://43.163.116.103:8010"
+# 必须与 API_BASE 指向同一个实例。0.4 改名时把 API 路径从 /api/v1/hongniang/*
+# 改成了 /api/v1/yuelao/*，但这一行漏了——它还指向 v0.2 的旧实例
+# （43.163.116.103:8010，现在跑的是另一个 Express 应用，对任何路径都回 HTML 404）。
+# 后果：不带 backend 参数的 register 全部失败，上线以来无人注册成功。
+# 改这一行时记得连带检查 API_BASE 与线上部署是否一致。
+DEFAULT_BACKEND="https://yuelao.ciyuanlife.cn"
 API_BASE="/api/v1/yuelao"
 
 err() { echo "ERROR: $*" >&2; exit 1; }
