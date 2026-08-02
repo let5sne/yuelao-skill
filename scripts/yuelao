@@ -175,6 +175,15 @@ cmd_sync() {
     pause_raw='{}'
     errors=$(echo "$errors" | jq '. + ["pause: 拉取失败"]')
   }
+  # 档案本身也要拉：matchable 只在 /profile 的响应里。不拉的话，"档案不完整所以
+  # 不参与匹配"这件事永远到不了红娘手上——她会日复一日看到空的推荐列表，
+  # 然后跟用户说"暂时没有合适的人"，而真实原因是用户还没填性别/年龄/城市。
+  local profile_raw
+  profile_raw=$(api GET "${API_BASE}/profile/${uid}" 2>/dev/null) || {
+    profile_raw='{}'
+    errors=$(echo "$errors" | jq '. + ["profile: 拉取失败"]')
+  }
+  echo "$profile_raw" | jq -e 'type=="object"' >/dev/null 2>&1 || profile_raw='{}'
 
   # 后端可能返回裸数组，也可能包一层 {recommendations:[...]}。
   # 注意不能写 (.recommendations // .)——对数组取字符串 key 会直接报错而非走 //。
@@ -210,6 +219,7 @@ cmd_sync() {
     --argjson recs "$recs" \
     --argjson inbox "$inbox" \
     --argjson pause "$pause_raw" \
+    --argjson profile "$profile_raw" \
     --argjson newc "$new_contacts" \
     --argjson old "$(jq '.recs' "$STATE")" \
     --argjson seen "$(jq '.seen_messages' "$STATE")" \
@@ -223,6 +233,13 @@ cmd_sync() {
       paused: ($pause.status // "active"),
       partial: (($errors | length) > 0),
       errors: $errors,
+      # 老服务端不返回 matchable，此时按 true 处理（不凭空报警）。
+      #
+      # 必须用 has() 而不是 (.matchable // true)：jq 的 // 把 false 也当空值，
+      # 所以 false // true == true——那会让**所有**不合格的用户被报成合格，
+      # 红娘照旧什么都不问，这个功能就等于没做。
+      matchable: (if ($profile|has("matchable")) then $profile.matchable else true end),
+      missing_labels: ($profile.missing_labels // []),
       changes: {
         new_recommendations: [ $recs[] | select($old[rid] == null) | rid ],
         status_changes: [ $recs[] | rid as $r

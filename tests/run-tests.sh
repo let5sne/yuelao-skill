@@ -154,6 +154,35 @@ assert_json "数字 id 与快照里的字符串 key 能对上" \
   "$(sync_diff '[{"id":7,"status":"matched"}]' '{"7":"matched"}' '{}')"
 
 echo
+echo "匹配资格透出（false 与"字段不存在"必须区分）"
+
+# 回归：第一版写作 ($profile.matchable // true)。jq 的 // 把 false 也当空值，
+# 于是 false // true == true——所有不合格的用户都会被报成合格，红娘什么都不问，
+# 整个闸门对用户就是隐形的。必须用 has() 判断字段是否存在。
+matchable_of() { # matchable_of <profile_json>
+  jq -n --argjson profile "$1" -c '{
+    matchable: (if ($profile|has("matchable")) then $profile.matchable else true end),
+    missing_labels: ($profile.missing_labels // [])
+  }'
+}
+
+assert_json "matchable:false 如实透出（不被 // 吞掉）" \
+  '{"matchable":false,"missing_labels":["性别","年龄"]}' \
+  "$(matchable_of '{"matchable":false,"missing_labels":["性别","年龄"]}')"
+
+assert_json "matchable:true 原样透出" \
+  '{"matchable":true,"missing_labels":[]}' \
+  "$(matchable_of '{"matchable":true,"missing_labels":[]}')"
+
+assert_json "老服务端不返回该字段时按合格处理（不凭空报警）" \
+  '{"matchable":true,"missing_labels":[]}' \
+  "$(matchable_of '{}')"
+
+assert_json "profile 拉取失败降级为 {} 时同样不误报" \
+  '{"matchable":true,"missing_labels":[]}' \
+  "$(matchable_of '{}')"
+
+echo
 echo "快照更新：网络失败不清空 state"
 
 # 这是扩展 sync 时发现的 bug：拉取失败降级成 [] 后照样覆盖快照，
