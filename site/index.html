@@ -12,7 +12,14 @@
 <meta property="og:description" content="因为你们的对话，从不离开你的电脑。">
 <meta property="og:url" content="https://yuelao.ciyuanlife.cn/">
 
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='25' x='2' font-size='26'>月</text></svg>">
+<!--
+  内联 SVG favicon。`<`、`>`、空格和中文都必须百分号编码：
+  未编码时宽容的浏览器能兜住，但严格的 URL 解析器（爬虫、部分预览抓取器）
+  认不出 data: scheme，会把整个值当相对路径去请求 /data:image/svg+xml,...
+  然后拿到 404。编码后任何解析器都当绝对 URL 处理。
+  %3C=< %3E=> %20=空格 %E6%9C%88=月
+-->
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2032%2032'%3E%3Ctext%20y='25'%20x='2'%20font-size='26'%3E%E6%9C%88%3C/text%3E%3C/svg%3E">
 
 <!--
   样式全部内联。
