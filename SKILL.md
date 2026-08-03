@@ -205,6 +205,7 @@ yuelao profile update '{"summary":{"personality":{"traits":["理性","安静"]}}
 
 ```yaml
 basic:      { age: 28, gender: male, city: 北京, occupation: 软件工程师, education: 硕士 }
+            # age / gender / city 是参与匹配的必填项，取值要求见下节
 lifestyle:  { hobbies: [跑步, 看电影], schedule: 朝九晚六偶尔加班, social_style: 小圈子社交 }
 personality: { traits: [理性, 安静, 有耐心], communication: 倾听型 }
 values:     { career_priority: 中等, family_importance: 高, life_goal: 工作生活平衡 }
@@ -223,7 +224,15 @@ preferences: { age_range: [25, 32], city: [北京], dealbreakers: [抽烟], nice
 会产出同性推荐。而你自己的 `preferences` 缺失只会放宽**你自己**的候选池，不损害任何
 其他人的筛选意愿——所以它们可以慢慢补。
 
-年龄必须是 18 以上的整数（`"三十"`、`17`、`30.5` 都不接受）。
+**取值要求：**
+
+- `age` — 18 以上的整数。`"三十"`、`17`、`30.5` 都不接受。
+- `gender` — `male` / `female` 或 `男` / `女` 均可（还接受 `m`/`f`/`男性`/`女性`/`男生`/`女生`，
+  大小写与首尾空格无关），服务端会归一化。**但认不出的取值等同于没填**：写
+  `非二元`、`other` 或拼错成 `mail` 都会让 `matchable` 为 `false`。当前的匹配语义是
+  严格二元异性，非二元取值在其中没有定义好的行为——与其静默地和一堆人错配，不如
+  明确告诉用户这个字段用不了。
+- `city` — 非空字符串。
 
 ## 隐私（对用户要说实话）
 

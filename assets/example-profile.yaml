@@ -2,9 +2,9 @@
 # 不需要一次填完，空字段表示还没聊到
 
 basic:
-  age: 28
-  gender: male
-  city: 北京
+  age: 28              # 必填。18 以上的整数
+  gender: male         # 必填。male/female 或 男/女 都可以，服务端会归一
+  city: 北京            # 必填
   occupation: 软件工程师
   education: 硕士
 
