@@ -285,6 +285,22 @@ echo "资格信息透出（register / profile update / profile set）"
 MOCK_BIN=$(mktemp -d)
 cat > "$MOCK_BIN/curl" <<'MOCK'
 #!/usr/bin/env bash
+if [[ "${MOCK_SYNC:-0}" == 1 ]]; then
+  default_recs='[{"id":1,"status":"pending"}]'
+  default_inbox='[{"id":9,"content":"hello"}]'
+  default_pause='{"status":"active"}'
+  default_profile='{"summary":{},"preferences":{},"matchable":false}'
+  default_exchange='{}'
+  case "${!#}" in
+    */recommendations/*) body="${MOCK_RECS-$default_recs}" ;;
+    */messages/*) body="${MOCK_INBOX-$default_inbox}" ;;
+    */pause) body="${MOCK_PAUSE-$default_pause}" ;;
+    */profile/*) body="${MOCK_PROFILE-$default_profile}" ;;
+    */exchange/*) body="${MOCK_EXCHANGE-$default_exchange}" ;;
+  esac
+  printf '%s\n200\n' "$body"
+  exit 0
+fi
 printf '%s\n%s\n' "${MOCK_BODY-}" "${MOCK_CODE:-200}"
 exit "${MOCK_EXIT:-0}"
 MOCK
@@ -379,6 +395,36 @@ out=$(MOCK_BODY='{"summary":{"basic":{"age":30,"city":"服务端规范化后的�
 assert_json "缓存写服务端响应（权威值），不是本地合并结果" \
   '{"summary":{"basic":{"age":30,"city":"服务端规范化后的城市"}},"preferences":{}}' \
   "$(cat "$YUELAO_HOME/profile-cache.json")"
+
+echo
+echo "sync 异常响应回归（实际 CLI）"
+fresh_home
+printf '%s\n' '{"recs":{"1":"pending"},"seen_messages":["9"],"filters":{},"exchanges":{},"feedback":[],"last_sync":0}' > "$YUELAO_HOME/state.json"
+for bad_recs in '<html>gateway error</html>' '{"error":"unavailable"}' '[null]' '[{"status":"pending"}]'; do
+  jq '.recs={"1":"pending"}' "$YUELAO_HOME/state.json" > "$YUELAO_HOME/state.tmp"
+  mv "$YUELAO_HOME/state.tmp" "$YUELAO_HOME/state.json"
+  out=$(MOCK_SYNC=1 MOCK_RECS="$bad_recs" "$CLI" sync 2>/dev/null || true)
+  assert_eq "异常推荐响应仍输出可解析的 partial:true" true "$(jq -r '.partial' <<<"$out" 2>/dev/null)"
+  assert_json "异常推荐响应保留旧快照" '{"1":"pending"}' "$(jq '.recs' "$YUELAO_HOME/state.json")"
+done
+out=$(MOCK_SYNC=1 MOCK_INBOX='{"error":"unavailable"}' "$CLI" sync 2>/dev/null || true)
+assert_eq "异常收件箱响应报告部分失败" true "$(jq -r '.partial' <<<"$out" 2>/dev/null)"
+assert_json "异常收件箱响应保留已见消息" '["9"]' "$(jq '.seen_messages' "$YUELAO_HOME/state.json")"
+out=$(MOCK_SYNC=1 MOCK_PROFILE='<html>error</html>' MOCK_PAUSE='{"error":"unavailable"}' "$CLI" sync 2>/dev/null || true)
+assert_eq "档案和暂停响应异常报告部分失败" true "$(jq -r '.partial' <<<"$out" 2>/dev/null)"
+assert_eq "档案未知不能伪造匹配合格" null "$(jq -r '.matchable' <<<"$out" 2>/dev/null)"
+assert_eq "暂停状态未知不能伪造 active" null "$(jq -r '.paused' <<<"$out" 2>/dev/null)"
+out=$(MOCK_SYNC=1 MOCK_RECS='[]' MOCK_INBOX='[]' "$CLI" sync 2>/dev/null || true)
+assert_eq "合法空列表成功同步" false "$(jq -r '.partial' <<<"$out" 2>/dev/null)"
+assert_json "合法空列表刷新快照" '{}' "$(jq '.recs' "$YUELAO_HOME/state.json")"
+out=$(MOCK_SYNC=1 MOCK_RECS='{"recommendations":[{"id":1,"status":"pending"}]}' MOCK_INBOX='{"messages":[{"id":9}]}' "$CLI" sync 2>/dev/null || true)
+assert_eq "包装列表仍兼容" false "$(jq -r '.partial' <<<"$out" 2>/dev/null)"
+assert_eq "matchable:false 仍如实输出" false "$(jq -r '.matchable' <<<"$out" 2>/dev/null)"
+out=$(MOCK_SYNC=1 MOCK_RECS='[{"id":1,"status":{"error":"missing"}}]' "$CLI" sync 2>/dev/null || true)
+assert_eq "对象状态的推荐报告部分失败" true "$(jq -r '.partial' <<<"$out" 2>/dev/null)"
+out=$(MOCK_SYNC=1 MOCK_INBOX='[{"recommendation_id":1}]' "$CLI" sync 2>/dev/null || true)
+assert_eq "消息必须有自己的 ID" true "$(jq -r '.partial' <<<"$out" 2>/dev/null)"
+assert_json "缺消息 ID 时不写入 null 已见标记" '["9"]' "$(jq '.seen_messages' "$YUELAO_HOME/state.json")"
 
 PATH="$SAVED_PATH"
 unset MOCK_BODY MOCK_CODE MOCK_EXIT

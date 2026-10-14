@@ -123,8 +123,8 @@ yuelao sync
 - `changes.new_recommendations` / `needs_filter` — 新推荐，先走筛选流程再展示。
 - `changes.new_messages` / `inbox_unread` — 对方传话来了："对了，上次你感兴趣的那位回话了……"
 - `followups_due` — 交换联系方式超过 3 天还没聊过反馈的匹配，该跟进了（见"约会后跟进"）。
-- `paused` — 如果是暂停状态，不推荐新的人，开场问要不要恢复。
-- `matchable` / `missing_labels` — **`matchable: false` 表示档案缺必填项，用户根本没有
+- `paused` — 如果是暂停状态，不推荐新的人，开场问要不要恢复。为 `null` 时表示本次查询失败，不能判断为已启用。
+- `matchable` / `missing_labels` — `matchable: null` 表示本次档案查询失败，不能判断匹配资格。**`matchable: false` 表示档案缺必填项，用户根本没有
   进入匹配池。** 这种情况下推荐列表当然是空的，但原因不是"没有合适的人"，而是信息不全。
   **绝不要说"暂时没有合适的人"**——那和 `partial: true` 时说这句一样，是把可解决的问题
   说成了客观事实。要如实说缺什么、并帮 TA 补上（见"首次使用"第 5 步）。补完立刻生效。

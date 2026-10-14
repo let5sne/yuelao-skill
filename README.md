@@ -34,7 +34,7 @@
 本仓库在此基础上：
 
 - **新增了完整的后端** `server/`（原项目的后端未开源）—— 两层匹配引擎、15 个 API 端点、
-  双向同意状态机、115 项服务端测试（含 IDOR / 越权 / 数据泄露的安全断言）
+  双向同意状态机、252 项服务端测试（含 IDOR / 越权 / 数据泄露的安全断言）
 - **实现了技术报告路线图里的第二层**：双塔向量交叉打分（`score = sim(A.seek,B.offer) × sim(B.seek,A.offer)`），
   而非原文描述的档案相似度
 - **修了客户端若干 bug**：`sync` 把后端故障静默降级为"没有数据"、拉取失败清空本地快照、
@@ -88,8 +88,8 @@
 
 ## 安装
 
-> 仓库当前是 private，下面的命令需要你的 GitHub 账号有访问权（或改用 SSH 地址
-> `git@github.com:let5sne/yuelao-skill.git`）。
+> 仓库公开，可直接使用下面的 HTTPS 命令克隆；也可以使用 SSH 地址
+> `git@github.com:let5sne/yuelao-skill.git`。
 
 ### Claude Code
 
@@ -114,7 +114,7 @@ git clone https://github.com/let5sne/yuelao-skill.git ~/.claude/skills/yuelao
 ./tests/run-tests.sh
 ```
 
-53 项测试，只依赖 bash + jq，不联网（网络部分用 PATH 前置的假 curl 隔离）。覆盖档案合并语义、`sync` 的 diff 与快照更新、响应解包、ID 类型处理、匹配资格透出，以及"先筛后展"不变量。
+73 项测试，只依赖 bash + jq，不联网（网络部分用 PATH 前置的假 curl 隔离）。覆盖档案合并语义、`sync` 的 diff 与快照更新、异常响应校验、ID 类型处理、匹配资格透出，以及"先筛后展"不变量。
 
 ---
 

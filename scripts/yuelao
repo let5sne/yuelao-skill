@@ -170,48 +170,59 @@ cmd_contact() {
   esac
 }
 
+# HTTP 成功还需验证响应形状；异常响应不能被当成空列表覆盖快照。
+sync_fetch() { # sync_fetch <path> <jq validation/normalization>
+  local raw
+  raw=$(api GET "$1") || return 1
+  printf '%s\n' "$raw" | jq -e -s "
+    if length == 1 then .[0] else error(\"expected one JSON value\") end
+    | $2"
+}
+
+JQ_SYNC_LIST='
+  def valid_id: (type == "string" and length > 0) or type == "number";
+  if type == "array" then .
+  elif type == "object" and (.[$key] | type) == "array" then .[$key]
+  else error("expected list") end
+  | if all(.[]; type == "object" and
+      (if $key == "messages" then (.id | valid_id)
+       else ((.id // .recommendation_id) | valid_id) and
+         (.status == null or (.status | type) == "string") end))
+    then . else error("invalid list item") end'
+
 cmd_sync() {
   require_config; ensure_state
   local uid; uid=$(cfg user_id)
 
   # 每类查询单独记录成败。网络故障不能伪装成"没有数据"——否则红娘会跟用户说
   # "暂时没新进展"，而实际上是后端不可用。
-  local errors='[]' recs_ok=1 inbox_ok=1
+  local errors='[]' recs_ok=1 inbox_ok=1 profile_ok=1 pause_ok=1
   local recs_raw inbox_raw pause_raw
-  recs_raw=$(api GET "${API_BASE}/recommendations/${uid}" 2>/dev/null) || {
+  recs_raw=$(sync_fetch "${API_BASE}/recommendations/${uid}" "\"recommendations\" as \$key | $JQ_SYNC_LIST" 2>/dev/null) || {
     recs_raw='[]'; recs_ok=0
     errors=$(echo "$errors" | jq '. + ["recommendations: 拉取失败"]')
   }
-  inbox_raw=$(api GET "${API_BASE}/messages/${uid}" 2>/dev/null) || {
+  inbox_raw=$(sync_fetch "${API_BASE}/messages/${uid}" "\"messages\" as \$key | $JQ_SYNC_LIST" 2>/dev/null) || {
     inbox_raw='[]'; inbox_ok=0
     errors=$(echo "$errors" | jq '. + ["messages: 拉取失败"]')
   }
-  pause_raw=$(api GET "${API_BASE}/profile/${uid}/pause" 2>/dev/null) || {
-    pause_raw='{}'
+  pause_raw=$(sync_fetch "${API_BASE}/profile/${uid}/pause" '
+    if type == "object" and (.status == "active" or .status == "paused")
+    then . else error("invalid pause response") end' 2>/dev/null) || {
+    pause_raw='{}'; pause_ok=0
     errors=$(echo "$errors" | jq '. + ["pause: 拉取失败"]')
   }
   # 档案本身也要拉：matchable 只在 /profile 的响应里。不拉的话，"档案不完整所以
   # 不参与匹配"这件事永远到不了红娘手上——她会日复一日看到空的推荐列表，
   # 然后跟用户说"暂时没有合适的人"，而真实原因是用户还没填性别/年龄/城市。
   local profile_raw
-  profile_raw=$(api GET "${API_BASE}/profile/${uid}" 2>/dev/null) || {
-    profile_raw='{}'
+  profile_raw=$(sync_fetch "${API_BASE}/profile/${uid}" '
+    if type == "object" and (.summary | type) == "object" and (.preferences | type) == "object"
+    then . else error("invalid profile response") end' 2>/dev/null) || {
+    profile_raw='{}'; profile_ok=0
     errors=$(echo "$errors" | jq '. + ["profile: 拉取失败"]')
   }
-  echo "$profile_raw" | jq -e 'type=="object"' >/dev/null 2>&1 || profile_raw='{}'
-
-  # 后端可能返回裸数组，也可能包一层 {recommendations:[...]}。
-  # 注意不能写 (.recommendations // .)——对数组取字符串 key 会直接报错而非走 //。
-  local recs inbox
-  recs=$(echo "$recs_raw" | jq '
-    if type=="array" then .
-    elif type=="object" and (.recommendations|type)=="array" then .recommendations
-    else [] end')
-  inbox=$(echo "$inbox_raw" | jq '
-    if type=="array" then .
-    elif type=="object" and (.messages|type)=="array" then .messages
-    else [] end')
-  echo "$pause_raw" | jq -e 'type=="object"' >/dev/null 2>&1 || pause_raw='{}'
+  local recs="$recs_raw" inbox="$inbox_raw"
 
   # 对"已提交联系方式但还没拿到对方的"匹配，自动查一次交换进度
   local new_contacts='[]' mid sub got res c
@@ -235,6 +246,8 @@ cmd_sync() {
     --argjson inbox "$inbox" \
     --argjson pause "$pause_raw" \
     --argjson profile "$profile_raw" \
+    --argjson profile_ok "$profile_ok" \
+    --argjson pause_ok "$pause_ok" \
     --argjson newc "$new_contacts" \
     --argjson old "$(jq '.recs' "$STATE")" \
     --argjson seen "$(jq '.seen_messages' "$STATE")" \
@@ -245,7 +258,7 @@ cmd_sync() {
     def rid: ((.id // .recommendation_id // "") | tostring);
     {
       synced_at: (now | floor),
-      paused: ($pause.status // "active"),
+      paused: (if $pause_ok == 1 then $pause.status else null end),
       partial: (($errors | length) > 0),
       errors: $errors,
       # 老服务端不返回 matchable，此时按 true 处理（不凭空报警）。
@@ -253,7 +266,8 @@ cmd_sync() {
       # 必须用 has() 而不是 (.matchable // true)：jq 的 // 把 false 也当空值，
       # 所以 false // true == true——那会让**所有**不合格的用户被报成合格，
       # 红娘照旧什么都不问，这个功能就等于没做。
-      matchable: (if ($profile|has("matchable")) then $profile.matchable else true end),
+      matchable: (if $profile_ok == 0 then null
+                  elif ($profile|has("matchable")) then $profile.matchable else true end),
       missing_labels: ($profile.missing_labels // []),
       changes: {
         new_recommendations: [ $recs[] | select($old[rid] == null) | rid ],
