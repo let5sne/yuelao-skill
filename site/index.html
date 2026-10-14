@@ -434,14 +434,15 @@ a:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-
         </li>
 
         <li class="step">
-          <h3>20 个候选，她只让 3 个走到你面前</h3>
+          <h3>候选都经她过一遍，最多 3 个走到你面前</h3>
           <p>
-            后台按硬条件和向量匹配筛出候选，她再按对你的了解筛一遍。她知道档案里写不出来的事——
+            后台按硬条件和向量匹配筛出候选，一轮最多入库 5 条推荐；她再按对你的了解筛一遍，
+            最多让你看到 3 个。她知道档案里写不出来的事——
             你嘴上说"学历无所谓"，但每次聊到高学历的人语气都不一样；你三次回避异地话题，
             却没把它写进"不能接受"。
           </p>
           <figure class="funnel">
-            <div class="dots" role="img" aria-label="20 个候选中，只有 3 个会被展示给你">
+            <div class="dots" role="img" aria-label="后台候选池；经她筛选后最多 3 个会展示给你">
               <span class="on"></span><span class="on"></span><span class="on"></span>
               <span></span><span></span><span></span><span></span><span></span>
               <span></span><span></span><span></span><span></span><span></span>
@@ -473,12 +474,12 @@ a:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-
         <li>
           <span class="what">聊天原文</span>
           <span class="where">你的电脑</span>
-          <span class="note">不上传。服务器没有、也不需要你们说过的每一句话。</span>
+          <span class="note">不发到匹配服务器。注意这不算"不出网"：月老跑在你自己的 agent 里，对话仍会经过你选的那个模型服务。</span>
         </li>
         <li>
           <span class="what">结构化画像</span>
-          <span class="where">服务器</span>
-          <span class="note">年龄、城市、性格标签这类，不含姓名——匹配引擎要用它。</span>
+          <span class="where">服务器 → 两类外部服务</span>
+          <span class="note">年龄、城市、性格标签这类，不含姓名——匹配引擎要用它。它还会发给算向量用的 embedding 服务和判断打分层用的 TypeSafe（只发结构化字段）。</span>
         </li>
         <li>
           <span class="what">联系方式</span>

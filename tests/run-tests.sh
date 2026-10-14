@@ -275,6 +275,115 @@ out=$("$CLI" filter 1 bogus 2>&1 || true)
 assert_contains "filter 只接受 shown/suppressed" "shown" "$out"
 
 echo
+echo "资格信息透出（register / profile update / profile set）"
+
+# ── 离线假 curl ──
+#
+# 真 curl 用 -w $'\n%{http_code}' 把状态码附在响应体之后，CLI 靠最后一行取码，
+# 所以 mock 必须复现"响应体 + 换行 + 状态码"这个形状，否则 CLI 解析不到状态码。
+# 响应内容由 MOCK_BODY / MOCK_CODE / MOCK_EXIT 逐用例控制，不联网。
+MOCK_BIN=$(mktemp -d)
+cat > "$MOCK_BIN/curl" <<'MOCK'
+#!/usr/bin/env bash
+printf '%s\n%s\n' "${MOCK_BODY-}" "${MOCK_CODE:-200}"
+exit "${MOCK_EXIT:-0}"
+MOCK
+chmod +x "$MOCK_BIN/curl"
+SAVED_PATH="$PATH"
+PATH="$MOCK_BIN:$PATH"
+
+# 每个用例一个干净的 YUELAO_HOME：cmd_register 见到已存在的 config 会直接拒绝，
+# 缓存和 config 也必须隔离，否则前一个用例会串味到下一个。
+# fresh_unregistered_home 只给空目录（注册用例需要"尚未注册"的初始状态）。
+fresh_unregistered_home() {
+  local d; d=$(mktemp -d)
+  export YUELAO_HOME="$d/.yuelao"
+}
+
+# 已注册状态：config + 缓存齐备，用于 profile update / set 用例。
+fresh_home() {
+  fresh_unregistered_home
+  mkdir -p "$YUELAO_HOME"
+  printf '%s\n' '{"user_id":"test-uid","api_token":"test-token","backend_url":"http://mock","contact":{"type":"","value":""}}' \
+    > "$YUELAO_HOME/config.json"
+  printf '%s\n' '{"summary":{"basic":{"age":30}},"preferences":{}}' \
+    > "$YUELAO_HOME/profile-cache.json"
+  chmod 600 "$YUELAO_HOME/config.json" "$YUELAO_HOME/profile-cache.json"
+}
+
+# 从 CLI 输出里抠出资格 JSON（从第一个以 { 开头的行到结尾），好用 assert_json 断言。
+elig() { sed -n '/^{/,$p' <<<"$1"; }
+
+FULL='{"user_id":"u1","api_token":"t1","recommendations":0,"matchable":true,"missing_fields":[],"missing_labels":[]}'
+PARTIAL='{"matchable":false,"missing_fields":["basic.city"],"missing_labels":["所在城市"]}'
+LEGACY='{"user_id":"u1","api_token":"t1","recommendations":0}'
+# 注册响应必然带 user_id/api_token（CLI 靠它们写 config）；资格字段是附加信息。
+PARTIAL_REG='{"user_id":"u1","api_token":"t1","recommendations":0,"matchable":false,"missing_fields":["basic.city"],"missing_labels":["所在城市"]}'
+
+# register：保留成功提示，并透出资格
+# 注意 `VAR=val cmd` 必须写在命令替换**内部**：写成 `VAR=val out=$(cmd)` 只会把
+# VAR 设成当前 shell 的变量而不导出，子进程（mock curl）看不到它。
+fresh_unregistered_home
+out=$(MOCK_BODY="$PARTIAL_REG" "$CLI" register '{"summary":{"basic":{"age":30}}}' 2>&1 || true)
+assert_contains "register 保留成功提示" "Registered. user_id" "$out"
+assert_json "register 透出资格（缺失字段）" \
+  '{"matchable":false,"missing_fields":["basic.city"],"missing_labels":["所在城市"]}' \
+  "$(elig "$out")"
+
+# register 不许回显 api_token
+if [[ "$out" != *"t1"* ]]; then
+  ok "register 不回显 api_token"
+else
+  bad "register 不回显 api_token" "输出里不含 token" "$out"
+fi
+
+fresh_unregistered_home
+out=$(MOCK_BODY="$FULL" "$CLI" register '{"summary":{"basic":{"age":30}}}' 2>&1 || true)
+assert_json "register 透出资格（完整档案）" \
+  '{"matchable":true,"missing_fields":[],"missing_labels":[]}' \
+  "$(elig "$out")"
+
+# profile update
+fresh_home
+out=$(MOCK_BODY="$PARTIAL" "$CLI" profile update '{"summary":{"basic":{"city":"成都"}}}' 2>&1 || true)
+assert_json "profile update 透出资格" \
+  '{"matchable":false,"missing_fields":["basic.city"],"missing_labels":["所在城市"]}' \
+  "$(elig "$out")"
+
+# profile set
+fresh_home
+out=$(MOCK_BODY="$FULL" "$CLI" profile set '{"summary":{"basic":{"age":30,"city":"北京","gender":"male"}},"preferences":{}}' 2>&1 || true)
+assert_json "profile set 透出资格" \
+  '{"matchable":true,"missing_fields":[],"missing_labels":[]}' \
+  "$(elig "$out")"
+
+# 旧后端不返回资格字段：必须如实显示 null，**不能伪造 matchable:true**
+fresh_home
+out=$(MOCK_BODY="$LEGACY" "$CLI" profile update '{"summary":{"basic":{"age":31}}}' 2>&1 || true)
+assert_json "旧后端缺字段时如实为 null（不伪造 true）" \
+  '{"matchable":null,"missing_fields":null,"missing_labels":null}' \
+  "$(elig "$out")"
+
+# API 失败时不覆盖缓存
+fresh_home
+before=$(cat "$YUELAO_HOME/profile-cache.json")
+out=$(MOCK_CODE=500 MOCK_BODY='{"error":"boom"}' "$CLI" profile update '{"summary":{"basic":{"age":99}}}' 2>&1 || true)
+after=$(cat "$YUELAO_HOME/profile-cache.json")
+assert_eq "API 失败时不覆盖缓存" "$before" "$after"
+assert_contains "API 失败时明确报错" "Profile update failed" "$out"
+
+# 缓存应以**服务端响应**为准，而不是本地合并结果
+fresh_home
+out=$(MOCK_BODY='{"summary":{"basic":{"age":30,"city":"服务端规范化后的城市"}},"preferences":{},"matchable":true,"missing_fields":[],"missing_labels":[]}' \
+  "$CLI" profile update '{"summary":{"basic":{"city":"客户端写的"}}}' 2>&1 || true)
+assert_json "缓存写服务端响应（权威值），不是本地合并结果" \
+  '{"summary":{"basic":{"age":30,"city":"服务端规范化后的城市"}},"preferences":{}}' \
+  "$(cat "$YUELAO_HOME/profile-cache.json")"
+
+PATH="$SAVED_PATH"
+unset MOCK_BODY MOCK_CODE MOCK_EXIT
+
+echo
 printf '\033[1m%s\033[0m\n' "结果: ${PASS} passed, ${FAIL} failed"
 echo
 [[ "$FAIL" -eq 0 ]]

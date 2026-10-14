@@ -7,6 +7,99 @@
 > **命名说明：** 项目在 0.4 改名为「月老 / yuelao」。0.3 及更早的条目保留当时的名字
 > （`hongniang`），因为它们描述的是当时的事实——改掉会让历史记录与 git 提交对不上。
 
+## 未发布 — M0：数据与契约（决定原因 / 评分来源 / 判断证据 / 资格透出）
+
+按 `docs/superpowers/plans/2026-09-19-evidence-based-matchmaking.md` 的 M0 阶段实施。
+四项任务的共同点：**先把"记录了什么、记录的是真的吗"补齐**，再谈改善匹配。
+
+### T1：CLI 资格信息透出（`scripts/yuelao`）
+
+注册、`profile update`、`profile set` 三个入口此前**丢弃**了服务端返回的资格字段，
+所以红娘看不到"这个用户还在闸门外"。现在三者共用一份 `print_eligibility`。
+
+- 注册保留原有两行成功提示，其后输出 `{matchable, missing_fields, missing_labels}`；
+  **不回显 `api_token`**。
+- 字段不存在时输出 `null`，**不伪造 `matchable: true`**——`jq` 的 `//` 会把 `false`
+  当空值（`false // true == true`），这个坑 0.2 已经踩过一次。
+- **顺带修掉一个真 bug**：`api PATCH … >/dev/null` 的返回码没人看，更新失败时照样把
+  本地合并结果写进缓存，于是本地缓存与服务端从此不一致，而后续每次增量合并都建立在
+  这个谎话上。现在失败即中止且不碰缓存。
+- **缓存改以服务端响应为准**（它的值才是权威的），不再写本地拼出来的那份。
+
+### T2：保存决定原因并统一状态返回
+
+新迁移 `server/migrations/003_decision_feedback.sql`：`recommendations` 增
+`response_reason_a/b`、`responded_at_a/b`。
+
+- 决定、原因、时间在**同一个行锁事务**里落地（只写决定不写原因，就回到"拒了但不知
+  道为什么"——而"为什么"是学习系统唯一的输入）。列名只来自代码常量，绝不来自请求。
+- 原因规则：去首尾空格；空串/纯空白视为没给（存 `null`）；非字符串非空值 → 400
+  （不静默丢弃）；上限 1000 字符。**接受时清空本侧旧原因**，不继承上一次拒绝的解释。
+- **修掉一个状态 bug**：响应状态原来只看自己这一侧，于是"对方已拒绝、我这边接受"
+  会回 `waiting_for_other`，红娘照着告诉用户"还在等对方"——而这一对早结束了。
+  现在统一走 `deriveStatus`。
+- 原因**两端独立**、越权写不进去、推荐接口**不泄露任何一方的原因**。
+
+### T3：区分用户评分与月老推测
+
+`date_feedback.rating_source`（`user_reported | agent_inferred | unknown`，缺省 `unknown`）。
+
+- **没有 `rating` 时强制 `unknown`**，即使调用方声明了 `user_reported`。用户自己给的
+  分是监督信号，月老推测的分是模型对自己输出的回声——拿回声训练等于自我确认。
+- 历史行**不批量升级**为用户评价（它们没有来源信息）。
+- SKILL.md 相应改掉"rating: 1-5 你根据描述判断"这句——它正是"把推测伪装成用户评价"
+  的源头。现在的口径是：用户没说数字就不生成数字，只填 `outcome` + `comment`；
+  推测可以有，但必须标成 `agent_inferred`；**不暗示"不评分就不能用"**。
+
+### T4：记录判断版本与执行结果
+
+`judgment.js` 重构为 `evaluatePair` 返回 `{judgment, meta}`，`judgePair` 保留为兼容包装。
+
+- `judgment_meta` 落进 `score_detail`：`status`（限定 `ok | disabled | timeout |
+  provider_error | invalid_response | input_too_large`，**每个分支都必须落一个**）、
+  `rubric_version`（当前 `legacy-1`）、`model_requested` 与 `model_returned` 分开
+  （别名会漂，不许用别名冒充版本）、`weights`、`input_hash`、`input_state`、
+  `evaluated_at`、`duration_ms`。
+- `input_hash` 对**白名单 state + rubric** 做稳定序列化后 SHA-256（对象键排序，数组保序）：
+  键顺序不同 hash 相同，档案或规则变化 hash 不同。**不用 `embedding.textHash`**——那个
+  哈希含 provider 标识，语义是"属于哪个向量空间"，混用会让换 provider 时判断指纹也变。
+- 各维保留 provider 的 `probabilities`，不可用时记 `null`，**不从分数倒推**假分布。
+- 整批总预算超时 → 整批标 `timeout` 并 abort，但仍带上 `judgmentMeta`（超时不等于
+  "什么都没发生"，事后要能看出当时跑的是哪版规则、哪份输入）。
+- **元数据不泄露**：`view.js` 只取 `judgment`，不取 `judgment_meta`；`input_state` 是
+  档案快照，随推荐级联删除（有专门用例锁住）。
+
+### 文档修正（说清楚哪些是设计、哪些是事实）
+
+- **`TUTORIAL.md`**：删掉"匹配引擎每天凌晨跑批 / 1-2 天内有第一批推荐"——根本没有批跑，
+  匹配是事件驱动的。改成"现在这一刻有没有人决定你看到什么"。
+- **`README.md` / `TECHNICAL-REPORT.md` / `site/index.html`**：把"后端推 20 个，月老
+  展示 3 个"改为真实数字（候选池 20 → 一轮最多入库 5 条 → 月老最多展示 3 个）。
+- **删除"越用越准/自动学习已生效"的表述**，改为标注"设计目标，尚未生效"：四层反馈里
+  三层永远收不到数据，`src/` 里没有 cron 或定时器，权重目前是一份静态外部先验。
+- **隐私陈述补两句必须说的**：① "对话原文不发匹配后端"**不等于**"不出网"——月老跑在
+  用户自己的 agent 里，对话仍会经过用户所选模型服务；② 结构化画像还会发给 embedding
+  服务与 TypeSafe。判断层的 `input_state` 是档案快照，单独说明其用途与清除方式。
+- **显式写明列表排序**：顺序由第一层确定性打分决定，双塔向量分与 `judgment` 都不参与
+  排序——"用户为什么看到这个人"必须永远可追溯到可解释的规则。
+
+### 测试
+
+- 客户端 **43 → 53**：新增离线假 `curl`（PATH 前置，复现"响应体 + 换行 + 状态码"形状），
+  覆盖完整档案 / 缺失字段 / 旧后端无字段 / API 失败不覆盖缓存 / 不回显 token /
+  缓存以响应为准。
+- 服务端 **196 → 240**：`contract.test.js` 增 20 项（决定原因 12 + 评分来源 8）、
+  `judgment.test.js` 增 21 项（执行状态各分支 8 + 元信息 8 + 输入指纹 5）、
+  `vector-integration.test.js` 增 3 项（真实管道的本地 Jev mock：元数据落库、
+  不泄露给推荐接口、注销后级联清除）。
+- 迁移连跑两次仍然成功（迁移按文件名每次重跑）。
+
+### 未做（M1 起，不是遗漏）
+
+- M1（最小事实与偏好、Jev v2 与过期识别、语义评估集）、M2（补问与底线）、M3（效果评估）
+  未启动。`rating_source` 与 `response_reason` 是为它们准备的数据基础。
+- `judgment_meta` 目前只是记录，**没有消费方**——它不参与排序、不影响任何决定。
+
 ## 未发布 — 修复：非 UTF-8 请求体被静默损坏
 
 **症状。** 生产上 5 个档案里 2 个的中文字段不可逆损坏（城市字段变成 U+FFFD），

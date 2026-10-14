@@ -100,6 +100,17 @@ api() { # api METHOD PATH [JSON_DATA]
 
 require_json() { echo "$1" | jq empty >/dev/null 2>&1 || err "Invalid JSON: $1"; }
 
+# 资格信息透出。写档案的三个入口（register / profile update / profile set）都要输出它，
+# 所以只有一份实现——曾经的问题正是"三个入口各写各的，两个忘了透出"。
+#
+# 刻意**不用** `// true` 之类的兜底：jq 的 `//` 把 false 当空值，会让
+# `false // true == true`，于是所有不合格的用户都被报成合格，整个闸门对用户隐形
+# （见 CHANGELOG 0.2）。字段不存在时这里输出 null，如实表示"这个后端不告诉我们"，
+# 绝不替服务端假装 matchable:true。
+print_eligibility() { # print_eligibility <响应 JSON>
+  printf '%s\n' "$1" | jq '{matchable, missing_fields, missing_labels}'
+}
+
 # ID 可能是自增整数也可能是 UUID：能转数字就按数字发，否则原样按字符串发。
 # （sync 内部一律按字符串比较，这里只影响出网 payload 的类型。）
 JQ_ID='def as_id: . as $s | try ($s | tonumber) catch $s;'
@@ -137,6 +148,10 @@ cmd_register() {
   ensure_state
   echo "Registered. user_id: $uid"
   echo "Next: save contact info locally with: yuelao contact set wechat <微信号>"
+  # 注册响应里带着资格信息（有没有到能参与匹配的门槛）。不透出的话，红娘会照
+  # SKILL.md 承诺"今晚开始匹配"，而用户其实还在闸门外——这两个状态对用户完全不同
+  # （一个要补档案，一个只能等）。api_token 不回显，它只该写进 config.json。
+  print_eligibility "$body"
 }
 
 cmd_contact() {
@@ -451,23 +466,33 @@ cmd_profile() {
       if [[ -f "$new" ]]; then new=$(cat "$new"); fi
       require_json "$new"
       ensure_cache
-      local merged
+      local merged res
       merged=$(jq -n --argjson cache "$(cat "$CACHE")" --argjson new "$new" \
         "${JQ_DEEPMERGE} dm(\$cache; \$new)")
-      api PATCH "${API_BASE}/profile/${uid}" "$merged" >/dev/null
-      echo "$merged" > "$CACHE"
+      # 失败必须中止，且**不碰缓存**。原来的写法是 `api PATCH … >/dev/null`，
+      # 返回码没人看：更新失败时照样把本地合并结果写进缓存，于是本地缓存和服务端
+      # 从此不一致，而后续每次增量合并都建立在这个谎话上。
+      res=$(api PATCH "${API_BASE}/profile/${uid}" "$merged") \
+        || err "Profile update failed; local cache left unchanged."
+      # 缓存以**服务端响应**为准（它的值才是权威的，可能被规范化过），
+      # 不是我们本地拼出来的那份。
+      printf '%s\n' "$res" | jq '{summary, preferences}' > "$CACHE"
       chmod 600 "$CACHE"
       echo "Profile updated (merged)."
+      print_eligibility "$res"
       ;;
     set)
       local full="${2:-}"
       [[ -n "$full" ]] || err "Usage: yuelao profile set '<full_json>'  (全量替换，用于删除数组元素等)"
       if [[ -f "$full" ]]; then full=$(cat "$full"); fi
       require_json "$full"
-      api PATCH "${API_BASE}/profile/${uid}" "$full" >/dev/null
-      echo "$full" | jq . > "$CACHE"
+      local res
+      res=$(api PATCH "${API_BASE}/profile/${uid}" "$full") \
+        || err "Profile replace failed; local cache left unchanged."
+      printf '%s\n' "$res" | jq '{summary, preferences}' > "$CACHE"
       chmod 600 "$CACHE"
       echo "Profile replaced."
+      print_eligibility "$res"
       ;;
     cache) [[ -f "$CACHE" ]] && cat "$CACHE" || echo '{}' ;;
     delete)
