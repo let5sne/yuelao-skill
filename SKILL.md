@@ -8,7 +8,7 @@ license: MIT
 metadata:
   author: baozhiwei
   version: "0.4"
-compatibility: Requires curl and jq. Works with any skills-compatible agent.
+compatibility: Requires curl, jq, and Python 3 (standard library only). Works with any skills-compatible agent.
 ---
 
 # 月老 — AI 婚恋顾问
@@ -73,13 +73,13 @@ CLI 自己维护本地状态（`~/.yuelao/`）：上次见过哪些推荐、什�
    聊天中要**自然地**把这三项带出来（"你在哪个城市"本来就是开场话题），不要变成
    查户口。但如果聊完还是缺，就直接说：这三项不填，系统根本没法帮你筛人。
 
-6. **如果写档案时拿到 400 且错误里提到 UTF-8 或 U+FFFD** —— 这台机器的终端/环境不是
-   UTF-8 代码页（中文 Windows 上常见是 GBK），中文在**发送之前**就被转坏了。服务端
-   拒绝是有意的：宽容解码会把它存成不可逆的乱码，而注册当时**不会**报任何错。
+6. **如果 CLI 报 UTF-8、U+FFFD 或孤立 Unicode 代理项错误，或服务器返回相关 400** ——
+   输入使用了错误编码，或在到达 CLI 之前已经丢失字节。CLI 会在 `jq`、联网和本地写入前
+   检查输入，不自动转码、不替换坏字节；服务器也继续拒绝非法请求。
 
    遇到时：**不要反复重试，也不要用拼音之类的降级值硬塞进去**——那会往档案里写错数据。
-   直接告诉用户这是他设备上的编码设置问题（Windows 可 `chcp 65001`，或换一个 UTF-8
-   环境），修好再重来一次即可。用户填的内容没有错，别让他重填。
+   让用户将原始文件保存为 UTF-8，并检查终端编码（Windows 可 `chcp 65001`，但文件本身
+   也必须是 UTF-8）。若文本已出现 `�`，需取得原始资料，改代码页无法恢复丢失字节。
 
    同一个错误在改档案、传话、反馈时都会出现，处理方式一样。错误响应里的
    `detail.hint.decoded_preview` 能解出原文本时，说明字节本身没坏、只是编码不对——

@@ -106,7 +106,7 @@ git clone https://github.com/let5sne/yuelao-skill.git ~/.claude/skills/yuelao
 
 ### 依赖
 
-- `curl` 和 `jq`
+- `curl`、`jq` 和 Python 3（使用标准库做严格 UTF-8 校验，无需安装 Python 包）
 
 ### 开发
 
@@ -114,7 +114,9 @@ git clone https://github.com/let5sne/yuelao-skill.git ~/.claude/skills/yuelao
 ./tests/run-tests.sh
 ```
 
-73 项测试，只依赖 bash + jq，不联网（网络部分用 PATH 前置的假 curl 隔离）。覆盖档案合并语义、`sync` 的 diff 与快照更新、异常响应校验、ID 类型处理、匹配资格透出，以及"先筛后展"不变量。
+108 项测试，依赖 bash + jq + Python 3，不联网（网络部分用 PATH 前置的假 curl 隔离）。覆盖档案合并语义、`sync` 的 diff 与快照更新、异常响应校验、UTF-8 前置校验、ID 类型处理、匹配资格透出，以及"先筛后展"不变量。
+
+CLI 会在输入进入 `jq`、网络请求或本地写入之前拒绝非 UTF-8 字节、`�`（U+FFFD）和 JSON 中孤立的 Unicode 代理项。错误不回显原始输入，也不猜编码或自动补字。遇到错误时，将原始资料保存为 UTF-8 后重试；已经丢失字节的文本需从原始资料重新取得。
 
 ---
 

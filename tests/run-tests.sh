@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 红娘 CLI 测试 — 无需额外依赖，只要 bash + jq。
+# 红娘 CLI 测试 — 需要 bash + jq + Python 3，网络由假 curl 隔离。
 #
 #   ./tests/run-tests.sh
 #
@@ -285,6 +285,7 @@ echo "资格信息透出（register / profile update / profile set）"
 MOCK_BIN=$(mktemp -d)
 cat > "$MOCK_BIN/curl" <<'MOCK'
 #!/usr/bin/env bash
+if [[ -n "${MOCK_CURL_LOG:-}" ]]; then printf 'called\n' >> "$MOCK_CURL_LOG"; fi
 if [[ "${MOCK_SYNC:-0}" == 1 ]]; then
   default_recs='[{"id":1,"status":"pending"}]'
   default_inbox='[{"id":9,"content":"hello"}]'
@@ -425,6 +426,104 @@ assert_eq "对象状态的推荐报告部分失败" true "$(jq -r '.partial' <<<
 out=$(MOCK_SYNC=1 MOCK_INBOX='[{"recommendation_id":1}]' "$CLI" sync 2>/dev/null || true)
 assert_eq "消息必须有自己的 ID" true "$(jq -r '.partial' <<<"$out" 2>/dev/null)"
 assert_json "缺消息 ID 时不写入 null 已见标记" '["9"]' "$(jq '.seen_messages' "$YUELAO_HOME/state.json")"
+
+echo
+echo "UTF-8 前置校验（实际 CLI，禁止请求和状态写入）"
+BAD_UTF8=$(printf '\263\311\266\274')
+BAD_JSON=$(printf '{"summary":{"basic":{"city":"%s"}},"preferences":{}}' "$BAD_UTF8")
+REPLACEMENT=$(printf '\357\277\275')
+BAD_FILE="$TMP_HOME/gbk-profile.json"
+printf '%s' "$BAD_JSON" > "$BAD_FILE"
+CURL_LOG="$TMP_HOME/encoding-curl.log"
+
+assert_encoding_rejected() {
+  local name="$1" expected="$2" input_mode="$3" out code
+  shift 3
+  : > "$CURL_LOG"
+  local before after
+  before=$(find "$YUELAO_HOME" -type f -exec cksum {} \; 2>/dev/null | sort)
+  if [[ "$input_mode" == stdin ]]; then
+    out=$(printf '%s' "$BAD_JSON" | MOCK_CURL_LOG="$CURL_LOG" MOCK_BODY="$FULL" "$CLI" "$@" 2>&1)
+  else
+    out=$(MOCK_CURL_LOG="$CURL_LOG" MOCK_BODY="$FULL" "$CLI" "$@" 2>&1)
+  fi
+  code=$?
+  after=$(find "$YUELAO_HOME" -type f -exec cksum {} \; 2>/dev/null | sort)
+  if [[ "$code" -ne 0 && "$out" == *"$expected"* && ! -s "$CURL_LOG" && "$before" == "$after" ]]; then
+    ok "${name}：本地拒绝、未联网、文件不变"
+  else
+    bad "${name}：本地拒绝、未联网、文件不变" "nonzero/$expected/no curl/unchanged files" "exit=$code output=$out curl=$(cat "$CURL_LOG") files_unchanged=$([[ "$before" == "$after" ]] && echo true || echo false)"
+  fi
+}
+
+for mode in argument file stdin; do
+  fresh_unregistered_home
+  mkdir -p "$YUELAO_HOME"
+  case "$mode" in
+    argument) input="$BAD_JSON" ;;
+    file) input="$BAD_FILE" ;;
+    stdin) input='-' ;;
+  esac
+  assert_encoding_rejected "注册 $mode 的 GBK 输入" UTF-8 "$mode" register "$input"
+done
+
+fresh_home
+printf '%s\n' '{"recs":{},"seen_messages":[],"filters":{"1":{"action":"shown"}},"exchanges":{},"feedback":[],"last_sync":0}' > "$YUELAO_HOME/state.json"
+assert_encoding_rejected '档案增量参数 GBK' UTF-8 argument profile update "$BAD_JSON"
+assert_encoding_rejected '档案增量文件 GBK' UTF-8 file profile update "$BAD_FILE"
+assert_encoding_rejected '档案全量文件 GBK' UTF-8 file profile set "$BAD_FILE"
+assert_encoding_rejected '筛选理由 GBK' UTF-8 argument filter 1 shown '' "$BAD_UTF8"
+assert_encoding_rejected '回应理由 GBK' UTF-8 argument respond reject 1 "$BAD_UTF8"
+assert_encoding_rejected '传话 GBK' UTF-8 argument message send 1 "$BAD_UTF8"
+assert_encoding_rejected '约会反馈 GBK' UTF-8 argument feedback submit 1 "$(printf '{"comment":"%s"}' "$BAD_UTF8")"
+assert_encoding_rejected '暂停理由 GBK' UTF-8 argument pause on "$BAD_UTF8"
+assert_encoding_rejected '联系方式 GBK' UTF-8 argument contact set wechat "$BAD_UTF8"
+assert_encoding_rejected '交换联系方式 GBK' UTF-8 argument exchange submit 1 "$BAD_UTF8"
+assert_encoding_rejected '字面 U+FFFD 传话' U+FFFD argument message send 1 "$REPLACEMENT"
+assert_encoding_rejected 'JSON 转义 U+FFFD' U+FFFD argument feedback submit 1 '{"comment":"\ufffd"}'
+assert_encoding_rejected 'JSON 孤立代理项' U+FFFD argument feedback submit 1 '{"comment":"\ud800"}'
+for invalid in "$(printf '\300\257')" "$(printf '\355\240\200')" "$(printf '\364\220\200\200')" "$(printf '\342\202')"; do
+  assert_encoding_rejected '非法 UTF-8 序列' UTF-8 argument message send 1 "$invalid"
+done
+
+: > "$CURL_LOG"
+out=$(MOCK_CURL_LOG="$CURL_LOG" MOCK_BODY='{"sent":true}' "$CLI" message send 1 '成都见 👋 𠀀 é' 2>&1)
+assert_contains '合法中文、emoji、扩展汉字及组合字符正常发送' '"sent":true' "$out"
+assert_eq '合法文本只发送一次请求' 1 "$(wc -l < "$CURL_LOG" | tr -d ' ')"
+out=$("$CLI" contact set wechat '中文昵称_👋' 2>&1)
+assert_contains '合法中文联系方式正常保存' 'Contact saved locally' "$out"
+assert_json '合法中文联系方式无损读回' '{"type":"wechat","value":"中文昵称_👋"}' "$("$CLI" contact get)"
+
+assert_encoding_rejected '重复 JSON 键中的 U+FFFD' U+FFFD argument feedback submit 1 '{"comment":"\ufffd","comment":"ok"}'
+assert_encoding_rejected '重复 JSON 键中的孤立代理项' U+FFFD argument feedback submit 1 '{"comment":"\ud800","comment":"ok"}'
+fresh_home
+assert_encoding_rejected '无状态文件时的坏反馈' U+FFFD argument feedback submit 1 '{"comment":"\ufffd"}'
+fresh_unregistered_home
+mkdir -p "$YUELAO_HOME"
+printf '%s\n' 'user_id: test-uid' 'api_token: test-token' 'backend_url: http://mock' > "$YUELAO_HOME/config.yaml"
+assert_encoding_rejected '旧配置未迁移时的坏档案文件' UTF-8 file profile update "$BAD_FILE"
+assert_encoding_rejected '旧配置未迁移时的坏注册标准输入' UTF-8 stdin register -
+fresh_unregistered_home
+mkdir -p "$YUELAO_HOME"
+printf '%s\n' 'user_id: test-uid' 'api_token: test-token' 'backend_url: http://mock' 'contact:' '  type: wechat' "  value: $BAD_UTF8" > "$YUELAO_HOME/config.yaml"
+assert_encoding_rejected '旧配置文件的 GBK 联系方式' UTF-8 argument status
+
+fresh_unregistered_home
+VALID_FILE="$TMP_HOME/utf8-bom-profile.json"
+printf '\357\273\277%s' '{"summary":{"basic":{"city":"成都","occupation":"研发\ud83d\ude00"}},"preferences":{}}' > "$VALID_FILE"
+out=$(MOCK_BODY="$FULL" "$CLI" register "$VALID_FILE" 2>&1)
+assert_contains '合法 UTF-8 BOM 文件仍可注册' 'Registered.' "$out"
+assert_json '中文和 JSON 代理对无损入缓存' '{"summary":{"basic":{"city":"成都","occupation":"研发😀"}},"preferences":{}}' "$(cat "$YUELAO_HOME/profile-cache.json" 2>/dev/null)"
+
+fresh_home
+printf '%s' "$BAD_JSON" > "$YUELAO_HOME/profile-cache.json"
+assert_encoding_rejected '旧缓存损坏不能作为合并 payload 发送' U+FFFD argument profile update '{"summary":{"basic":{"age":31}}}'
+fresh_unregistered_home
+mkdir -p "$YUELAO_HOME"
+printf '%s\n' 'user_id: test-uid' 'api_token: test-token' 'backend_url: http://mock' 'contact:' '  type: wechat' '  value: 中文昵称_👋' > "$YUELAO_HOME/config.yaml"
+out=$("$CLI" status 2>&1)
+assert_contains '合法 UTF-8 旧配置正常迁移' '"registered": true' "$out"
+assert_json '迁移保留中文联系方式' '{"type":"wechat","value":"中文昵称_👋"}' "$("$CLI" contact get)"
 
 PATH="$SAVED_PATH"
 unset MOCK_BODY MOCK_CODE MOCK_EXIT

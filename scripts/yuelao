@@ -10,6 +10,7 @@
 # 用法: yuelao <command> [args]，运行 yuelao help 查看全部命令。
 
 set -euo pipefail
+CLI_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 HN_DIR="${YUELAO_HOME:-$HOME/.yuelao}"
 CONFIG="$HN_DIR/config.json"
@@ -25,9 +26,24 @@ API_BASE="/api/v1/yuelao"
 
 err() { echo "ERROR: $*" >&2; exit 1; }
 
-for c in curl jq; do
+for c in curl jq python3; do
   command -v "$c" >/dev/null 2>&1 || err "$c is required but not installed."
 done
+
+# 必须在 jq/命令替换处理用户数据之前校验，不能让宽容解码悄悄替换坏字节。
+require_utf8() {
+  python3 "$CLI_DIR/check-utf8.py" || exit 1
+}
+
+read_json_input() {
+  if [[ "$1" == "-" ]]; then
+    python3 "$CLI_DIR/check-utf8.py" --json --echo
+  elif [[ -f "$1" ]]; then
+    python3 "$CLI_DIR/check-utf8.py" --json --echo < "$1"
+  else
+    printf '%s' "$1" | python3 "$CLI_DIR/check-utf8.py" --json --echo
+  fi
+}
 
 # ---------- 配置 ----------
 
@@ -35,6 +51,7 @@ done
 migrate_config() {
   local old="$HN_DIR/config.yaml"
   if [[ -f "$CONFIG" || ! -f "$old" ]]; then return 0; fi
+  require_utf8 < "$old"
   local uid tok url ctype cval
   uid=$(grep '^user_id:' "$old" 2>/dev/null | sed 's/^user_id:[[:space:]]*//' | tr -d "'\"" || true)
   tok=$(grep '^api_token:' "$old" 2>/dev/null | sed 's/^api_token:[[:space:]]*//' | tr -d "'\"" || true)
@@ -78,6 +95,8 @@ update_state() { # usage: update_state [--arg k v ...] '<jq program>'
 
 api() { # api METHOD PATH [JSON_DATA]
   local method="$1" path="$2" data="${3:-}"
+  # 生成 payload 时若旧缓存中的损坏被 jq 转成 U+FFFD，也不能继续发送。
+  if [[ -n "$data" ]]; then require_json "$data"; fi
   local url token resp code body
   url="$(cfg backend_url)${path}"
   token="$(cfg api_token)"
@@ -98,7 +117,9 @@ api() { # api METHOD PATH [JSON_DATA]
   printf '%s\n' "$body"
 }
 
-require_json() { echo "$1" | jq empty >/dev/null 2>&1 || err "Invalid JSON: $1"; }
+require_json() {
+  printf '%s' "$1" | python3 "$CLI_DIR/check-utf8.py" --json || exit 1
+}
 
 # 资格信息透出。写档案的三个入口（register / profile update / profile set）都要输出它，
 # 所以只有一份实现——曾经的问题正是"三个入口各写各的，两个忘了透出"。
@@ -120,13 +141,10 @@ JQ_ID='def as_id: . as $s | try ($s | tonumber) catch $s;'
 cmd_register() {
   local input="${1:-}" backend="${2:-$DEFAULT_BACKEND}"
   [[ -n "$input" ]] || err "Usage: yuelao register '<json>' [backend_url]  (or '-' for stdin)"
+  local json
+  json=$(read_json_input "$input") || exit 1
   migrate_config
   [[ -f "$CONFIG" ]] && err "Already registered ($CONFIG exists). Use 'yuelao profile update' instead."
-  local json
-  if [[ "$input" == "-" ]]; then json=$(cat)
-  elif [[ -f "$input" ]]; then json=$(cat "$input")
-  else json="$input"; fi
-  require_json "$json"
 
   local resp code body uid tok
   resp=$(curl -sS --max-time 30 -X POST -H "Content-Type: application/json" \
@@ -407,13 +425,15 @@ cmd_message() {
 }
 
 cmd_feedback() {
+  local rec="${2:-}" data="${3:-}"
+  if [[ "${1:-}" == "submit" ]]; then
+    [[ -n "$rec" && -n "$data" ]] || err "Usage: yuelao feedback submit <recommendation_id> '<json>'"
+    require_json "$data"
+  fi
   require_config; ensure_state
   local uid; uid=$(cfg user_id)
   case "${1:-}" in
     submit)
-      local rec="${2:-}" data="${3:-}"
-      [[ -n "$rec" && -n "$data" ]] || err "Usage: yuelao feedback submit <recommendation_id> '<json>'"
-      require_json "$data"
       local payload
       payload=$(echo "$data" | jq --arg u "$uid" --arg r "$rec" \
         "${JQ_ID}"' . + {user_id:$u, recommendation_id:($r|as_id)}')
@@ -465,6 +485,11 @@ ensure_cache() {
 }
 
 cmd_profile() {
+  local validated
+  if [[ "${1:-}" == "update" || "${1:-}" == "set" ]]; then
+    [[ -n "${2:-}" ]] || err "Usage: yuelao profile ${1} '<json>' (or file / - for stdin)"
+    validated=$(read_json_input "$2") || exit 1
+  fi
   require_config
   local uid; uid=$(cfg user_id)
   case "${1:-}" in
@@ -475,10 +500,7 @@ cmd_profile() {
       echo "$res"
       ;;
     update)
-      local new="${2:-}"
-      [[ -n "$new" ]] || err "Usage: yuelao profile update '<json>'"
-      if [[ -f "$new" ]]; then new=$(cat "$new"); fi
-      require_json "$new"
+      local new="$validated"
       ensure_cache
       local merged res
       merged=$(jq -n --argjson cache "$(cat "$CACHE")" --argjson new "$new" \
@@ -496,10 +518,7 @@ cmd_profile() {
       print_eligibility "$res"
       ;;
     set)
-      local full="${2:-}"
-      [[ -n "$full" ]] || err "Usage: yuelao profile set '<full_json>'  (全量替换，用于删除数组元素等)"
-      if [[ -f "$full" ]]; then full=$(cat "$full"); fi
-      require_json "$full"
+      local full="$validated"
       local res
       res=$(api PATCH "${API_BASE}/profile/${uid}" "$full") \
         || err "Profile replace failed; local cache left unchanged."
@@ -569,6 +588,8 @@ EOF
 
 # ---------- 分发 ----------
 
+# 用 NUL 分隔参数，避免跨参数拼成合法字符；一次校验后再进入 jq 或本地写入。
+if [[ "$#" -gt 0 ]]; then printf '%s\0' "$@" | require_utf8; fi
 CMD="${1:-help}"
 shift || true
 case "$CMD" in

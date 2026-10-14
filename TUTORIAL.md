@@ -7,7 +7,9 @@
 你需要：
 
 1. 一个支持 [Agent Skills](https://agentskills.io) 的工具（如 Claude Code）
-2. 机器上装有 `curl` 和 `jq`（macOS 一般自带 curl，jq 可以 `brew install jq`）
+2. 机器上装有 `curl`、`jq` 和 Python 3（Python 只用标准库；macOS 可用 `brew install jq python`）
+
+输入文件需保存为 UTF-8。CLI 遇到错误编码或 `�` 会在发送前停止；如果原文已经损坏，请从原始资料重新取得，不要靠重复提交或改成拼音绕过检查。
 
 安装 skill：
 
