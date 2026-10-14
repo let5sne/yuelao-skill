@@ -1,0 +1,11 @@
+# macOS 会在每个被 Finder 打开过的目录里放一个 .DS_Store。它不是项目内容，
+# 而且会随浏览行为不断变化——提交进去只会制造无意义的 diff。
+.DS_Store
+
+# 依赖与本地运行产物
+node_modules/
+*.log
+
+# 判断层/embedding 的本地凭据不该进仓库（生产走 /etc/yuelao.env）
+.env
+.env.*

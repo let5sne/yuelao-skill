@@ -114,7 +114,7 @@ git clone https://github.com/let5sne/yuelao-skill.git ~/.claude/skills/yuelao
 ./tests/run-tests.sh
 ```
 
-43 项测试，只依赖 bash + jq，不联网。覆盖档案合并语义、`sync` 的 diff 与快照更新、响应解包、ID 类型处理、匹配资格透出，以及"先筛后展"不变量。
+53 项测试，只依赖 bash + jq，不联网（网络部分用 PATH 前置的假 curl 隔离）。覆盖档案合并语义、`sync` 的 diff 与快照更新、响应解包、ID 类型处理、匹配资格透出，以及"先筛后展"不变量。
 
 ---
 
