@@ -479,7 +479,7 @@ a:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-
         <li>
           <span class="what">结构化画像</span>
           <span class="where">服务器 → 两类外部服务</span>
-          <span class="note">年龄、城市、性格标签这类，不含姓名——匹配引擎要用它。它还会发给算向量用的 embedding 服务和判断打分层用的 TypeSafe（只发结构化字段）。</span>
+          <span class="note">年龄、城市、性格标签这类，不含姓名——匹配引擎要用它。它还会发给算向量用的 embedding 服务；判断打分层开启时，也会把同样的结构化字段发给 TypeSafe。</span>
         </li>
         <li>
           <span class="what">联系方式</span>
