@@ -146,7 +146,10 @@ A："帮我问问她周末干嘛" → A 的月老包装 → POST /messages → �
 我未表态（无论对方是否已接受）   → pending            进入待筛选
 我已接受、对方未表态             → waiting_for_other
 双方都接受                       → matched            可交换联系方式
-任一方拒绝                       → rejected
+任一方拒绝                       → rejected           终局：不能再改为接受，传话关闭
+对方暂停（尚未 matched/rejected）→ partner_paused     冻结：不能接受、不能传话；恢复后还原
+
+约会反馈只接受配对过的一对（当前 matched，或曾 matched 并交换过联系方式）。
 ```
 
 联系方式交换只有 `matched` 状态才能提交和获取。
@@ -179,8 +182,8 @@ date_feedback       — 约会后反馈（recommendation_id, outcome, rating, ra
 | `/response` | POST | 接受/拒绝推荐 | Bearer token |
 | `/recommendations/:id/filter` | POST | 月老筛选反馈（`:id` 为推荐 ID） | Bearer token |
 | `/exchange/:rec_id` | POST/GET | 联系方式交换（仅 `matched`） | Bearer token |
-| `/messages` | POST | 发送传话 | Bearer token |
-| `/messages/:user_id` | GET | 查看收件箱 | Bearer token |
+| `/messages` | POST | 发送传话（对方未回复前最多 3 条、每人每小时 30 条，超出 429；对方暂停 409） | Bearer token |
+| `/messages/:user_id` | GET | 查看收件箱；`?box=sent` 查看自己发出的（不含收件人与已读时间） | Bearer token |
 | `/messages/:id/read` | POST | 标记已读 | Bearer token |
 | `/feedback` | POST | 提交约会后反馈 | Bearer token |
 | `/feedback/:user_id` | GET | 查看约会反馈 | Bearer token |

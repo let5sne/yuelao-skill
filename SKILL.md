@@ -7,7 +7,7 @@ description: >
 license: MIT
 metadata:
   author: baozhiwei
-  version: "0.5.1"
+  version: "0.6"
 compatibility: Requires curl, jq, and Python 3 (standard library only). Works with any skills-compatible agent.
 ---
 
@@ -126,6 +126,12 @@ yuelao sync
 - `changes.contacts_received` — 对方的联系方式到了（sync 会自动去取），主动告诉用户。
 - `changes.new_recommendations` / `needs_filter` — 新推荐，先走筛选流程再展示。
 - `changes.new_messages` / `inbox_unread` — 对方传话来了："对了，上次你感兴趣的那位回话了……"
+- `changes.removed_recommendations` — 推荐消失了（对方注销了账号），带着消失前的状态 `last_status`。
+  如果是 `matched` 或你们正在传话的那位，要主动、温和地告诉用户，不要继续当作还在进行中；
+  已拿到的联系方式仍在本地，但对方已不再使用这个服务。没展示过的推荐消失了就不必提。
+- 推荐状态 `partner_paused` — 对方暂停了，这条推荐冻结：**不能接受、不能传话**，也不要展示给
+  用户（它不会进 `needs_filter`）。已展示过的，用户问起就说"对方这阵子暂停了，回来了我第一时间
+  告诉你"。对方恢复后状态会变回 `pending` / `waiting_for_other`，出现在 `status_changes` 里。
 - `followups_due` — 交换联系方式超过 3 天还没聊过反馈的匹配，该跟进了（见"约会后跟进"）。
 - `paused` — 如果是暂停状态，不推荐新的人，开场问要不要恢复。为 `null` 时表示本次查询失败，不能判断为已启用。
 - `matchable` / `missing_labels` — `matchable: null` 表示本次档案查询失败，不能判断匹配资格。**`matchable: false` 表示档案缺必填项，用户根本没有
@@ -159,8 +165,10 @@ yuelao sync
 - **用户没给理由就别编。** 不要为了"有数据"替他造一个解释——那是把你的推测
   当成他的意愿记下来（和评分来源同一个道理）。空着比编一个强。
 - 上限 1000 字符；非字符串会被服务端拒绝（400）。
-- **改主意时不要沿用旧理由**：用户先说"异地不考虑"、后来说"其实可以聊聊"，
-  你就 `respond accept`——服务端会清掉本侧旧理由，不需要你手动处理。
+- **拒绝是终局，提交前确认。** `respond reject` 之后不能再改成接受（服务端返回 409）：
+  对方此时已经看到"被拒绝"、传话也已关闭，改口会让对方凭空收到一个配对。所以用户语气
+  犹豫（"好像不太合适吧……"）时**先问清楚**，确定了再提交。反过来可以：接受之后改主意，
+  照常 `respond reject`。
 
 
 **你可以：** 压住推荐不展示（不删除，留着以后看）、调整顺序、在后端理由之上补充你自己的判断。
@@ -200,6 +208,22 @@ yuelao sync
 **触发时机：** 用户犹豫不决（"感觉还行但不太确定"→主动提议"要不要我帮你问问TA几个问题？"）；用户想了解更多（"她周末干嘛？"）；用户同意了但对方没回应想试探。
 
 **脚本：** `yuelao message send <rec_id> "<你包装后的话>"`；收件箱在 `sync` 的 `inbox_unread` 里；转述给用户后 `yuelao message read <msg_id>` 标记已读。
+**接话前先看完整来回：** `yuelao message thread <rec_id>` 按时间列出这条推荐上双方的所有传话
+（`direction: sent / received`）。不要只凭对方最新一句和记忆接话——你上次替用户说了什么，
+在这里才看得到。
+
+**服务端的限制（如实转告，不要绕）：**
+
+- 对方回复之前，同一条推荐上最多连发 3 条，超出返回 429（`reason: unanswered_limit`）。
+  跟用户说"先等等 TA 的回复"，不要换个说法再发。
+- 每人每小时最多 30 条（`reason: hourly_limit`）。
+- 对方暂停中返回 409（`recipient is paused`）：这条传话没有送达，告诉用户对方这阵子不在。
+- 已拒绝的推荐不能传话。
+
+**拉黑：** 对方骚扰、冒犯、索要不该要的东西，或者用户明确说"别让 TA 再联系我"→
+`yuelao block <rec_id> "原因"`。效果是永久拒绝：传话关闭、两人永远不会再被推荐。
+和 `respond reject` 不同，它**不要求先有 filter 记录**——骚扰者可能来自一条你压住、
+从没给用户看过的推荐。拉黑前跟用户确认一句，它和拒绝一样不能撤回。
 
 **传话的分寸（重要）：**
 
@@ -240,6 +264,16 @@ yuelao sync
 
 用户说"最近不想看了"/"在跟一个人发展"→ 主动提议暂停：`yuelao pause on "原因"`。
 想回来：`yuelao pause off`。`sync` 的 `paused` 字段每次都会带出来。
+
+暂停期间：不会匹配新的人；**也不接收传话**；还没成局的推荐对对方显示为 `partner_paused`
+（对方不能接受、不能传话）。已经配对成功的不受影响，联系方式交换照常。告诉用户这些，
+让 TA 知道暂停是真的"静一静"。
+
+### 推荐处理完了
+
+推荐只在注册、改档案、恢复时自动计算，以及有新人加入时顺带算到你。如果当前的推荐都已经
+处理完（没有 `pending`），用户又想再看看，用 `yuelao match` 主动要一轮。返回的 `created`
+是新增条数；为 0 就如实说眼下池子里没有新的符合条件的人，**不要反复调用**。
 
 ### 档案：对话式收集与更新
 

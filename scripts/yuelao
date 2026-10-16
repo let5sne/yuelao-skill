@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 红娘 CLI v0.3 — 统一入口
+# 月老 CLI v0.6 — 统一入口
 #
 # 所有后端交互和本地状态管理都在这一个脚本里。
 # 本地文件（默认 ~/.yuelao/，可用 YUELAO_HOME 覆盖）：
@@ -166,7 +166,7 @@ cmd_register() {
   ensure_state
   echo "Registered. user_id: $uid"
   echo "Next: save contact info locally with: yuelao contact set wechat <微信号>"
-  # 注册响应里带着资格信息（有没有到能参与匹配的门槛）。不透出的话，红娘会照
+  # 注册响应里带着资格信息（有没有到能参与匹配的门槛）。不透出的话，月老会照
   # SKILL.md 承诺"今晚开始匹配"，而用户其实还在闸门外——这两个状态对用户完全不同
   # （一个要补档案，一个只能等）。api_token 不回显，它只该写进 config.json。
   print_eligibility "$body"
@@ -212,7 +212,7 @@ cmd_sync() {
   require_config; ensure_state
   local uid; uid=$(cfg user_id)
 
-  # 每类查询单独记录成败。网络故障不能伪装成"没有数据"——否则红娘会跟用户说
+  # 每类查询单独记录成败。网络故障不能伪装成"没有数据"——否则月老会跟用户说
   # "暂时没新进展"，而实际上是后端不可用。
   local errors='[]' recs_ok=1 inbox_ok=1 profile_ok=1 pause_ok=1
   local recs_raw inbox_raw pause_raw
@@ -231,7 +231,7 @@ cmd_sync() {
     errors=$(echo "$errors" | jq '. + ["pause: 拉取失败"]')
   }
   # 档案本身也要拉：matchable 只在 /profile 的响应里。不拉的话，"档案不完整所以
-  # 不参与匹配"这件事永远到不了红娘手上——她会日复一日看到空的推荐列表，
+  # 不参与匹配"这件事永远到不了月老手上——她会日复一日看到空的推荐列表，
   # 然后跟用户说"暂时没有合适的人"，而真实原因是用户还没填性别/年龄/城市。
   local profile_raw
   profile_raw=$(sync_fetch "${API_BASE}/profile/${uid}" '
@@ -272,7 +272,8 @@ cmd_sync() {
     --argjson filters "$(jq '.filters' "$STATE")" \
     --argjson exch "$(jq '.exchanges' "$STATE")" \
     --argjson fb "$(jq '.feedback' "$STATE")" \
-    --argjson errors "$errors" '
+    --argjson errors "$errors" \
+    --argjson recs_ok "$recs_ok" '
     def rid: ((.id // .recommendation_id // "") | tostring);
     {
       synced_at: (now | floor),
@@ -283,12 +284,19 @@ cmd_sync() {
       #
       # 必须用 has() 而不是 (.matchable // true)：jq 的 // 把 false 也当空值，
       # 所以 false // true == true——那会让**所有**不合格的用户被报成合格，
-      # 红娘照旧什么都不问，这个功能就等于没做。
+      # 月老照旧什么都不问，这个功能就等于没做。
       matchable: (if $profile_ok == 0 then null
                   elif ($profile|has("matchable")) then $profile.matchable else true end),
       missing_labels: ($profile.missing_labels // []),
       changes: {
         new_recommendations: [ $recs[] | select($old[rid] == null) | rid ],
+        # 上次还在、这次没了：对方注销了账号。只在推荐拉取成功时计算——
+        # 拉取失败时 $recs 是空的，否则会把所有推荐都误报成"消失"。
+        removed_recommendations: (if $recs_ok == 1
+          then ([ $recs[] | rid ] as $now
+                | [ $old | to_entries[] | select(.key as $k | ($now | index($k)) | not)
+                    | {id: .key, last_status: .value} ])
+          else [] end),
         status_changes: [ $recs[] | rid as $r
           | select(($old[$r] != null) and ($old[$r] != (.status // "unknown")))
           | {id: $r, from: $old[$r], to: (.status // "unknown")} ],
@@ -400,6 +408,31 @@ cmd_exchange() {
   esac
 }
 
+# 拉黑 = 拒绝（终局）。与 respond reject 的区别：不要求本地 filter 记录——
+# 被骚扰时对方可能来自一条从未展示给用户的推荐（月老压住了，但对方还在传话）。
+# 拒绝后服务端封掉这条推荐上的传话，这一对也永远不会再被推荐。
+cmd_block() {
+  require_config; ensure_state
+  local rec="${1:-}" reason="${2:-}"
+  [[ -n "$rec" ]] || err "Usage: yuelao block <recommendation_id> [reason]"
+  local uid payload
+  uid=$(cfg user_id)
+  payload=$(jq -n --arg u "$uid" --arg r "$rec" --arg rs "$reason" \
+    "${JQ_ID}"' {user_id:$u, recommendation_id:($r|as_id), response:"reject", reason:$rs}')
+  api POST "${API_BASE}/response" "$payload" >/dev/null
+  update_state --arg r "$rec" '.blocked = (((.blocked // []) + [$r]) | unique)'
+  echo "Blocked (rec ${rec}): rejected permanently, messages on this recommendation are closed."
+}
+
+# 请求新一轮推荐。注册和改档案时会自动算；推荐都处理完、又没人新注册时，
+# 用这个主动补一轮（只为自己算，服务端去重，不会重复推荐同一个人）。
+cmd_match() {
+  require_config; ensure_state
+  local resp
+  resp=$(api POST "${API_BASE}/match/run" '{}')
+  printf '%s\n' "$resp" | jq '{created: (.created // 0)}'
+}
+
 cmd_message() {
   require_config; ensure_state
   local uid; uid=$(cfg user_id)
@@ -413,6 +446,20 @@ cmd_message() {
       api POST "${API_BASE}/messages" "$payload"
       ;;
     inbox) api GET "${API_BASE}/messages/${uid}" ;;
+    sent) api GET "${API_BASE}/messages/${uid}?box=sent" ;;
+    thread)
+      # 某条推荐上的完整来回：收件箱 + 已发，按时间排序。月老接话前看这个，
+      # 而不是只看对方说了什么。
+      local rec="${2:-}" inbox sent
+      [[ -n "$rec" ]] || err "Usage: yuelao message thread <recommendation_id>"
+      inbox=$(api GET "${API_BASE}/messages/${uid}")
+      sent=$(api GET "${API_BASE}/messages/${uid}?box=sent")
+      jq -n --argjson in "$inbox" --argjson out "$sent" --arg r "$rec" '
+        def rid: (.recommendation_id | tostring);
+        [ ($in[]  | select(rid == $r) | {direction: "received", id, content, created_at, read_at}),
+          ($out[] | select(rid == $r) | {direction: "sent", id, content, created_at}) ]
+        | sort_by(.created_at)'
+      ;;
     read)
       local mid="${2:-}"
       [[ -n "$mid" ]] || err "Usage: yuelao message read <message_id>"
@@ -420,7 +467,7 @@ cmd_message() {
       payload=$(jq -n --arg u "$uid" '{user_id:$u}')
       api POST "${API_BASE}/messages/${mid}/read" "$payload"
       ;;
-    *) err "Usage: yuelao message <send|inbox|read> [args]" ;;
+    *) err "Usage: yuelao message <send|inbox|sent|thread|read> [args]" ;;
   esac
 }
 
@@ -558,7 +605,7 @@ cmd_status() {
 
 cmd_help() {
   cat <<'EOF'
-yuelao — 红娘 skill 统一 CLI
+yuelao — 月老 skill 统一 CLI
 
   register '<json>' [backend_url]        注册（json 也可为文件路径或 - 读 stdin）
   status                                 本地状态概览（是否注册、联系方式是否已设置）
@@ -566,7 +613,7 @@ yuelao — 红娘 skill 统一 CLI
   contact set <type> <value>             设置联系方式（只存本地）
   contact get                            查看联系方式
   filter <rec_id> <shown|suppressed> [rank] [reason]
-                                         回传红娘筛选判断（展示给用户之前必须先做）
+                                         回传月老筛选判断（展示给用户之前必须先做）
   respond <accept|reject> <rec_id> [reason]
                                          回应推荐（要求该推荐已有 filter 记录；
                                          --force 仅用于本地状态丢失后的人工修复）
@@ -574,7 +621,11 @@ yuelao — 红娘 skill 统一 CLI
   exchange get <match_id>                获取对方联系方式
   message send <rec_id> "<msg>"          传话给对方
   message inbox                          查看收到的传话
+  message sent                           查看自己发出的传话
+  message thread <rec_id>                某条推荐上的完整来回（收发合并，按时间）
   message read <msg_id>                  标记已读
+  block <rec_id> [reason]                拉黑：永久拒绝并关闭传话（不要求 filter 记录）
+  match                                  请求新一轮推荐（推荐处理完后用）
   feedback submit <rec_id> '<json>'      约会后反馈 {"outcome":"chatting|met|dating|ended","rating":1-5,"comment":"..."}
   feedback list                          查看已提交反馈
   pause <on|off|status> [reason]         暂停/恢复匹配
@@ -598,6 +649,8 @@ case "$CMD" in
   sync)     cmd_sync "$@" ;;
   filter)   cmd_filter "$@" ;;
   respond)  cmd_respond "$@" ;;
+  block)    cmd_block "$@" ;;
+  match)    cmd_match "$@" ;;
   exchange) cmd_exchange "$@" ;;
   message)  cmd_message "$@" ;;
   feedback) cmd_feedback "$@" ;;

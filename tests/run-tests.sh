@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 红娘 CLI 测试 — 需要 bash + jq + Python 3，网络由假 curl 隔离。
+# 月老 CLI 测试 — 需要 bash + jq + Python 3，网络由假 curl 隔离。
 #
 #   ./tests/run-tests.sh
 #
@@ -157,7 +157,7 @@ echo
 echo "匹配资格透出（false 与"字段不存在"必须区分）"
 
 # 回归：第一版写作 ($profile.matchable // true)。jq 的 // 把 false 也当空值，
-# 于是 false // true == true——所有不合格的用户都会被报成合格，红娘什么都不问，
+# 于是 false // true == true——所有不合格的用户都会被报成合格，月老什么都不问，
 # 整个闸门对用户就是隐形的。必须用 has() 判断字段是否存在。
 matchable_of() { # matchable_of <profile_json>
   jq -n --argjson profile "$1" -c '{
@@ -294,6 +294,7 @@ if [[ "${MOCK_SYNC:-0}" == 1 ]]; then
   default_exchange='{}'
   case "${!#}" in
     */recommendations/*) body="${MOCK_RECS-$default_recs}" ;;
+    *box=sent) body="${MOCK_SENT-[]}" ;;
     */messages/*) body="${MOCK_INBOX-$default_inbox}" ;;
     */pause) body="${MOCK_PAUSE-$default_pause}" ;;
     */profile/*) body="${MOCK_PROFILE-$default_profile}" ;;
@@ -524,6 +525,48 @@ printf '%s\n' 'user_id: test-uid' 'api_token: test-token' 'backend_url: http://m
 out=$("$CLI" status 2>&1)
 assert_contains '合法 UTF-8 旧配置正常迁移' '"registered": true' "$out"
 assert_json '迁移保留中文联系方式' '{"type":"wechat","value":"中文昵称_👋"}' "$("$CLI" contact get)"
+
+echo
+echo "产品缺陷回归：移除通知 / 冻结状态 / 完整传话 / 拉黑 / 主动要推荐"
+fresh_home
+printf '%s\n' '{"recs":{"1":"pending","2":"matched"},"seen_messages":[],"filters":{},"exchanges":{},"feedback":[],"last_sync":0}' > "$YUELAO_HOME/state.json"
+out=$(MOCK_SYNC=1 MOCK_RECS='[{"id":1,"status":"pending"}]' MOCK_INBOX='[]' "$CLI" sync 2>/dev/null || true)
+assert_json "对方注销：报告被移除的推荐和移除前状态" '[{"id":"2","last_status":"matched"}]' "$(jq -c '.changes.removed_recommendations' <<<"$out")"
+assert_json "移除后快照不再含该推荐" '{"1":"pending"}' "$(jq -c '.recs' "$YUELAO_HOME/state.json")"
+
+printf '%s\n' '{"recs":{"1":"pending","2":"matched"},"seen_messages":[],"filters":{},"exchanges":{},"feedback":[],"last_sync":0}' > "$YUELAO_HOME/state.json"
+out=$(MOCK_SYNC=1 MOCK_RECS='<html>bad gateway</html>' MOCK_INBOX='[]' "$CLI" sync 2>/dev/null || true)
+assert_json "推荐拉取失败时不误报移除" '[]' "$(jq -c '.changes.removed_recommendations' <<<"$out")"
+
+printf '%s\n' '{"recs":{"1":"pending"},"seen_messages":[],"filters":{},"exchanges":{},"feedback":[],"last_sync":0}' > "$YUELAO_HOME/state.json"
+out=$(MOCK_SYNC=1 MOCK_RECS='[{"id":1,"status":"partner_paused"}]' MOCK_INBOX='[]' "$CLI" sync 2>/dev/null || true)
+assert_json "对方暂停表现为状态变化" '[{"id":"1","from":"pending","to":"partner_paused"}]' "$(jq -c '.changes.status_changes' <<<"$out")"
+assert_json "冻结中的推荐不进入待筛选" '[]' "$(jq -c '.needs_filter' <<<"$out")"
+
+out=$(MOCK_SYNC=1 \
+  MOCK_INBOX='[{"id":9,"recommendation_id":1,"content":"好呀","created_at":"2026-10-16T02:00:00Z","read_at":null},{"id":11,"recommendation_id":2,"content":"别的人","created_at":"2026-10-16T03:00:00Z","read_at":null}]' \
+  MOCK_SENT='[{"id":8,"recommendation_id":1,"content":"周末爬山吗","created_at":"2026-10-16T01:00:00Z"}]' \
+  "$CLI" message thread 1 2>/dev/null || true)
+assert_json "thread 合并收发并按时间排序、只含该推荐" '[["sent","周末爬山吗"],["received","好呀"]]' "$(jq -c '[.[] | [.direction, .content]]' <<<"$out")"
+out=$("$CLI" message thread 2>&1 || true)
+assert_contains "thread 缺推荐 ID 时提示用法" "Usage: yuelao message thread" "$out"
+
+fresh_home
+out=$(MOCK_BODY='{"recorded":true,"status":"rejected","matched":false}' "$CLI" block 5 "骚扰" 2>&1 || true)
+assert_contains "block 不要求 filter 记录" "Blocked (rec 5)" "$out"
+assert_json "block 记入本地状态" '["5"]' "$(jq -c '.blocked' "$YUELAO_HOME/state.json")"
+out=$(MOCK_BODY='{"error":"recommendation already rejected"}' MOCK_CODE=409 "$CLI" block 5 2>&1 || true)
+assert_contains "服务端错误如实透出" "409" "$out"
+
+out=$(MOCK_BODY='{"scope":"self","created":2}' "$CLI" match 2>&1 || true)
+assert_json "match 输出新增推荐数" '{"created":2}' "$(jq -c . <<<"$out")"
+
+out=$("$CLI" help 2>&1 || true)
+for c in "block <rec_id>" "match " "message thread" "message sent"; do
+  assert_contains "help 列出 $c" "$c" "$out"
+done
+assert_not_contains_brand() { if grep -q '红娘' <<<"$3"; then bad "$1" "不含 红娘" "$3"; else ok "$1"; fi; }
+assert_not_contains_brand "help 不再出现旧品牌名" "" "$out"
 
 PATH="$SAVED_PATH"
 unset MOCK_BODY MOCK_CODE MOCK_EXIT
