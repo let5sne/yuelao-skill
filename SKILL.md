@@ -7,7 +7,7 @@ description: >
 license: MIT
 metadata:
   author: baozhiwei
-  version: "0.5"
+  version: "0.5.1"
 compatibility: Requires curl, jq, and Python 3 (standard library only). Works with any skills-compatible agent.
 ---
 
@@ -102,7 +102,7 @@ CLI 自己维护本地状态（`~/.yuelao/`）：上次见过哪些推荐、什�
 - 首次注册完成后，主动预告下一步。**但不要承诺时间。**
 
   匹配是**事件驱动**的：注册那一刻算一次，之后每有新人加入、或你改了档案就再算一次。
-  没有"每晚跑一次"的后台任务（`server/README.md` 写明推荐是注册时即时生成）。所以
+  没有"每晚跑一次"的后台任务（后端的推荐是注册或改档案时即时生成）。所以
   "今晚会开始帮你匹配"是假承诺——用户第二天来看到"暂无"，会以为系统坏了。
 
   `matchable` 为 `true` 时，如实说：

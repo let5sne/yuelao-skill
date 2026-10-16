@@ -33,8 +33,10 @@
 客户端 skill 的原始作者是 [@zwbao](https://github.com/zwbao)（[hongniang-skill](https://github.com/zwbao/hongniang-skill)，MIT）。
 本仓库在此基础上：
 
-- **新增了完整的后端** `server/`（原项目的后端未开源）—— 两层匹配引擎、15 个 API 端点、
-  双向同意状态机、270 项服务端测试（含 IDOR / 越权 / 数据泄露的安全断言）
+- **新增了完整的后端**（原项目的后端未开源）—— 两层匹配引擎、15 个 API 端点、
+  双向同意状态机、270 项服务端测试（含 IDOR / 越权 / 数据泄露的安全断言）。
+  后端自 0.5 起维护在独立的私有仓库，本仓库只包含 Skill、CLI 与官网；
+  CLI 默认连接公共实例 `https://yuelao.ciyuanlife.cn`
 - **实现了技术报告路线图里的第二层**：双塔向量交叉打分（`score = sim(A.seek,B.offer) × sim(B.seek,A.offer)`），
   而非原文描述的档案相似度
 - **修了客户端若干 bug**：`sync` 把后端故障静默降级为"没有数据"、拉取失败清空本地快照、
