@@ -39,6 +39,7 @@
 LLM 是系统里最不可靠的执行者，所以工作流程的时序和状态不依赖提示词自觉，全部收进 `yuelao` CLI：
 
 - **本地状态快照。** `~/.yuelao/state.json` 记录上次同步的推荐状态、已见消息、筛选记录、联系方式交换进度。`yuelao sync` 拉取全量数据后与快照 diff，直接输出结构化的"变化摘要"（新推荐、状态跃迁、新传话、到手的联系方式、到期的跟进），月老只负责把它讲成人话。跨会话的"记忆"由文件承担，不依赖 LLM 的上下文。
+- **主动通知。** `yuelao notify` 用 `sync --peek`（只计算变化、不写快照）检查新动态，有就发一条系统通知（macOS 用 osascript，Linux 用 notify-send），内容只有数量。按变化内容做摘要去重，同一组变化只提醒一次；后台连不上时静默。`notify install` 在 macOS 上写一个 launchd 任务定时运行（不含 token，token 仍只在 `config.json`）。
 - **代码强制的不变量。** `respond` 拒绝没有本地 filter 记录的推荐——"先筛选、回传判断、再展示、用户表态"这个顺序不是提示词请求，而是程序保证。
 - **不丢数据的合并语义。** 档案增量更新的深度合并规则：object 递归合并；纯字符串数组取并集（增量添加不丢失旧值）；其他数组（如 `age_range`）整体替换；删除元素走 `profile set` 全量替换。
 - **输入编码前置校验。** CLI 使用 Python 3 标准库在 `jq` 处理之前严格验证 UTF-8；JSON 文件和标准输入先校验再读入 shell。非 UTF-8、U+FFFD、孤立代理项和重复键中隐藏的损坏值都会被拒绝，异常输入不会发请求或写本地数据；服务端继续独立校验请求。
@@ -147,7 +148,11 @@ A："帮我问问她周末干嘛" → A 的月老包装 → POST /messages → �
 我已接受、对方未表态             → waiting_for_other
 双方都接受                       → matched            可交换联系方式
 任一方拒绝                       → rejected           终局：不能再改为接受，传话关闭
+最后互动后 14 天仍未成局         → expired            终局：不能接受、不能传话（优先于 partner_paused）
 对方暂停（尚未 matched/rejected）→ partner_paused     冻结：不能接受、不能传话；恢复后还原
+
+"互动" = 推荐生成、任一方表态、任一方传话。过期在读取时按时间计算（不落库、无定时任务），
+TTL 由服务端 REC_TTL_DAYS 配置。未成局的推荐带 expires_at。
 
 约会反馈只接受配对过的一对（当前 matched，或曾 matched 并交换过联系方式）。
 ```
@@ -179,10 +184,10 @@ date_feedback       — 约会后反馈（recommendation_id, outcome, rating, ra
 | `/profile/:id/pause` | POST/GET | 暂停匹配 | Bearer token |
 | `/profile/:id/resume` | POST | 恢复匹配 | Bearer token |
 | `/recommendations/:id` | GET | 获取推荐（含对方脱敏画像） | Bearer token |
-| `/response` | POST | 接受/拒绝推荐 | Bearer token |
+| `/response` | POST | 接受/拒绝推荐（拒绝后再接受、对方暂停或推荐过期时接受 409） | Bearer token |
 | `/recommendations/:id/filter` | POST | 月老筛选反馈（`:id` 为推荐 ID） | Bearer token |
 | `/exchange/:rec_id` | POST/GET | 联系方式交换（仅 `matched`） | Bearer token |
-| `/messages` | POST | 发送传话（对方未回复前最多 3 条、每人每小时 30 条，超出 429；对方暂停 409） | Bearer token |
+| `/messages` | POST | 发送传话（对方未回复前最多 3 条、每人每小时 30 条，超出 429；对方暂停或推荐过期 409） | Bearer token |
 | `/messages/:user_id` | GET | 查看收件箱；`?box=sent` 查看自己发出的（不含收件人与已读时间） | Bearer token |
 | `/messages/:id/read` | POST | 标记已读 | Bearer token |
 | `/feedback` | POST | 提交约会后反馈 | Bearer token |

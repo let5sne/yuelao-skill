@@ -568,6 +568,73 @@ done
 assert_not_contains_brand() { if grep -q '红娘' <<<"$3"; then bad "$1" "不含 红娘" "$3"; else ok "$1"; fi; }
 assert_not_contains_brand "help 不再出现旧品牌名" "" "$out"
 
+echo
+echo "推荐过期 / 主动通知"
+fresh_home
+NLOG="$TMP_HOME/notify-calls.log"
+FAKE_NOTIFY="$TMP_HOME/fake-notify"
+printf '#!/usr/bin/env bash\nprintf "%%s|%%s\\n" "$1" "$2" >> "%s"\n' "$NLOG" > "$FAKE_NOTIFY"
+chmod +x "$FAKE_NOTIFY"
+export YUELAO_NOTIFY_CMD="$FAKE_NOTIFY"
+: > "$NLOG"
+printf '%s\n' '{"recs":{"1":"pending"},"seen_messages":[],"filters":{},"exchanges":{},"feedback":[],"last_sync":0}' > "$YUELAO_HOME/state.json"
+N_RECS='[{"id":1,"status":"expired"},{"id":2,"status":"pending"}]'
+N_INBOX='[{"id":9,"recommendation_id":2,"content":"周末有空吗","created_at":"2026-10-16T02:00:00Z","read_at":null}]'
+before=$(cksum < "$YUELAO_HOME/state.json")
+out=$(MOCK_SYNC=1 MOCK_RECS="$N_RECS" MOCK_INBOX="$N_INBOX" "$CLI" sync --peek 2>/dev/null || true)
+assert_json "sync --peek 照样报告变化" '{"new":["2"],"msgs":1}' "$(jq -c '{new:.changes.new_recommendations, msgs:(.changes.new_messages|length)}' <<<"$out")"
+assert_eq "sync --peek 不写本地状态" "$before" "$(cksum < "$YUELAO_HOME/state.json")"
+assert_json "过期表现为状态变化" '[{"id":"1","from":"pending","to":"expired"}]' "$(jq -c '.changes.status_changes' <<<"$out")"
+
+out=$(MOCK_SYNC=1 MOCK_RECS="$N_RECS" MOCK_INBOX="$N_INBOX" "$CLI" notify 2>/dev/null || true)
+assert_json "notify 汇总数量" '{"notified":true,"new_recommendations":1,"messages":1,"expired":1}' \
+  "$(jq -c '{notified, new_recommendations, messages, expired}' <<<"$out")"
+assert_eq "notify 调用通知器一次" 1 "$(wc -l < "$NLOG" | tr -d ' ')"
+assert_contains "通知含数量" "1 位新推荐、1 条新传话、1 条推荐已过期" "$(cat "$NLOG")"
+if grep -q '周末有空吗' "$NLOG"; then bad "通知不含传话内容" "无内容" "$(cat "$NLOG")"; else ok "通知不含传话内容"; fi
+assert_json "notify 不动快照（月老之后 sync 仍能看到）" '{"1":"pending"}' "$(jq -c '.recs' "$YUELAO_HOME/state.json")"
+
+out=$(MOCK_SYNC=1 MOCK_RECS="$N_RECS" MOCK_INBOX="$N_INBOX" "$CLI" notify 2>/dev/null || true)
+assert_json "同一组变化不重复提醒" '{"notified":false,"reason":"already_notified"}' "$(jq -c . <<<"$out")"
+assert_eq "重复检查不再调用通知器" 1 "$(wc -l < "$NLOG" | tr -d ' ')"
+
+MOCK_SYNC=1 MOCK_RECS="$N_RECS" MOCK_INBOX="$N_INBOX" "$CLI" sync >/dev/null 2>&1 || true
+out=$(MOCK_SYNC=1 MOCK_RECS="$N_RECS" MOCK_INBOX="$N_INBOX" "$CLI" notify 2>/dev/null || true)
+assert_json "月老 sync 之后无变化不提醒" '{"notified":false,"reason":"no_changes"}' "$(jq -c . <<<"$out")"
+
+out=$(MOCK_SYNC=1 MOCK_RECS='<html>bad gateway</html>' MOCK_INBOX="$N_INBOX" "$CLI" notify 2>/dev/null || true)
+assert_json "后台连不上时不提醒" '{"notified":false,"reason":"partial"}' "$(jq -c . <<<"$out")"
+assert_eq "连不上时不调用通知器" 1 "$(wc -l < "$NLOG" | tr -d ' ')"
+
+LA_DIR="$TMP_HOME/LaunchAgents"
+out=$(YUELAO_OS=Darwin YUELAO_LAUNCHD_DIR="$LA_DIR" YUELAO_SKIP_LAUNCHCTL=1 https_proxy=http://127.0.0.1:7890 "$CLI" notify install 30 2>&1 || true)
+PL="$LA_DIR/cn.ciyuanlife.yuelao.notify.plist"
+assert_contains "install 提示已开启" "every 30 minutes" "$out"
+assert_contains "plist 间隔 1800 秒" "<integer>1800</integer>" "$(cat "$PL" 2>/dev/null)"
+assert_contains "plist 运行 yuelao notify" "<string>notify</string>" "$(cat "$PL" 2>/dev/null)"
+assert_contains "plist 带上代理变量" "<key>https_proxy</key><string>http://127.0.0.1:7890</string>" "$(cat "$PL" 2>/dev/null)"
+assert_contains "plist 指定 YUELAO_HOME" "<key>YUELAO_HOME</key><string>$YUELAO_HOME</string>" "$(cat "$PL" 2>/dev/null)"
+if grep -q 'test-token\|api_token' "$PL" 2>/dev/null; then bad "plist 不含 token" "无 token" "$(cat "$PL")"; else ok "plist 不含 token"; fi
+if command -v plutil >/dev/null 2>&1; then
+  if plutil -lint "$PL" >/dev/null; then ok "plist 格式合法（plutil）"; else bad "plist 格式合法（plutil）" "lint ok" "$(plutil -lint "$PL")"; fi
+elif command -v python3 >/dev/null 2>&1; then
+  if python3 -c 'import plistlib,sys; plistlib.load(open(sys.argv[1],"rb"))' "$PL" 2>/dev/null; then ok "plist 格式合法（plistlib）"; else bad "plist 格式合法（plistlib）" "parse ok" "$(cat "$PL")"; fi
+fi
+assert_json "status 显示已开启" '{"installed":true,"interval_minutes":30}' "$("$CLI" notify status | jq -c '{installed, interval_minutes}')"
+out=$(YUELAO_OS=Darwin YUELAO_LAUNCHD_DIR="$LA_DIR" YUELAO_SKIP_LAUNCHCTL=1 "$CLI" notify install 5 2>&1 || true)
+assert_contains "间隔过短被拒绝" "between 10 and 1440" "$out"
+out=$(YUELAO_OS=Darwin YUELAO_LAUNCHD_DIR="$LA_DIR" YUELAO_SKIP_LAUNCHCTL=1 "$CLI" notify uninstall 2>&1 || true)
+assert_contains "uninstall 提示已关闭" "Notifications off" "$out"
+if [[ -e "$PL" ]]; then bad "uninstall 删除 plist" "不存在" "$PL"; else ok "uninstall 删除 plist"; fi
+assert_json "status 显示已关闭" '{"installed":false}' "$("$CLI" notify status | jq -c '{installed}')"
+out=$(YUELAO_OS=Linux "$CLI" notify install 15 2>&1 || true)
+assert_contains "非 macOS 给出 crontab 行" "*/15 * * * *" "$out"
+out=$("$CLI" notify bogus 2>&1 || true)
+assert_contains "notify 未知子命令提示用法" "Usage: yuelao notify" "$out"
+out=$("$CLI" help 2>&1 || true)
+assert_contains "help 列出 notify install" "notify install" "$out"
+unset YUELAO_NOTIFY_CMD
+
 PATH="$SAVED_PATH"
 unset MOCK_BODY MOCK_CODE MOCK_EXIT
 

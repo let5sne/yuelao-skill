@@ -2,10 +2,30 @@
 
 > 版本号说明：git 历史中有一个 2026-04 的 commit 自称 "v0.3"，但当时的 metadata 与
 > 实际发布版本是 0.1；随后 0.2 才是第一个统一 CLI 的版本。此处以 SKILL.md 的
-> `metadata.version` 为准，当前为 **0.5**。
+> `metadata.version` 为准，当前为 **0.7**。
 >
 > **命名说明：** 项目在 0.4 改名为「月老 / yuelao」。0.3 及更早的条目保留当时的名字
 > （`hongniang`），因为它们描述的是当时的事实——改掉会让历史记录与 git 提交对不上。
+
+## 0.7 (2026-10-16) — 推荐过期与主动通知
+
+服务端部分在私有仓库 yuelao-server（同版本号）。
+
+**推荐过期**
+- 最后一次互动（推荐生成、任一方表态、任一方传话）后 14 天仍未成局，推荐变为 `expired`：终局，
+  不能接受、不能传话（409），可以拒绝。原来对方不打开月老，这边就永远"等待对方"。
+- 已 matched / rejected 不过期；过期优先于 `partner_paused`（对方恢复也不复活）。
+- 未成局的推荐带 `expires_at`。过期在读取时计算，无数据库迁移、无定时任务。
+
+**主动通知（CLI）**
+- `yuelao sync --peek`：只计算变化，不写本地状态。
+- `yuelao notify`：有新推荐、新传话、双方同意、联系方式到达、推荐过期时发系统通知，只含数量，
+  不含姓名与传话内容；同一组变化只提醒一次；后台连不上时静默。`YUELAO_NOTIFY_CMD` 可替换通知器。
+- `yuelao notify install [分钟]` / `uninstall` / `status`：macOS 写 launchd 任务
+  （`cn.ciyuanlife.yuelao.notify`，带 PATH、YUELAO_HOME 与代理变量，不含 token）；其他系统打印 crontab 行。
+- SKILL.md：`expired` 与 `expires_at` 的说法；征得同意后开启提醒。
+
+**测试。** CLI 124 → 152；服务端 279 → 290。另用真实 CLI 对真实服务端做了端到端验证。
 
 ## 0.6 (2026-10-16) — 产品流程缺陷修复
 

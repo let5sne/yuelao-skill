@@ -7,7 +7,7 @@ description: >
 license: MIT
 metadata:
   author: baozhiwei
-  version: "0.6"
+  version: "0.7"
 compatibility: Requires curl, jq, and Python 3 (standard library only). Works with any skills-compatible agent.
 ---
 
@@ -132,6 +132,11 @@ yuelao sync
 - 推荐状态 `partner_paused` — 对方暂停了，这条推荐冻结：**不能接受、不能传话**，也不要展示给
   用户（它不会进 `needs_filter`）。已展示过的，用户问起就说"对方这阵子暂停了，回来了我第一时间
   告诉你"。对方恢复后状态会变回 `pending` / `waiting_for_other`，出现在 `status_changes` 里。
+- 推荐状态 `expired` — 双方 14 天没有任何互动（表态、传话都算）还没成局，这条推荐过期了：
+  **不能接受、不能传话**，是终局。用户等过的，如实而温和地说"对方一直没回应，这条先放下了"，
+  不要说成被拒绝，也不要再拿它出来劝。没展示过的过期了就不必提。
+- `expires_at` — 未成局的推荐会带过期时间。用户在犹豫、或者在等对方时，可以顺口提一句
+  "还有 N 天"，但别拿它催促用户做决定。
 - `followups_due` — 交换联系方式超过 3 天还没聊过反馈的匹配，该跟进了（见"约会后跟进"）。
 - `paused` — 如果是暂停状态，不推荐新的人，开场问要不要恢复。为 `null` 时表示本次查询失败，不能判断为已启用。
 - `matchable` / `missing_labels` — `matchable: null` 表示本次档案查询失败，不能判断匹配资格。**`matchable: false` 表示档案缺必填项，用户根本没有
@@ -268,6 +273,22 @@ yuelao sync
 暂停期间：不会匹配新的人；**也不接收传话**；还没成局的推荐对对方显示为 `partner_paused`
 （对方不能接受、不能传话）。已经配对成功的不受影响，联系方式交换照常。告诉用户这些，
 让 TA 知道暂停是真的"静一静"。
+
+### 有新动态时提醒
+
+月老只有在用户来找你时才知道有没有新消息。注册完成、或者用户说"有消息了告诉我"时，
+**征得同意后**开启后台提醒：
+
+```
+yuelao notify install 30     # 每 30 分钟检查一次（10–1440），macOS 用 launchd
+```
+
+- 有新推荐、新传话、双方都同意、联系方式到了、推荐过期时，系统会弹一条通知，**只有数量**
+  （比如"1 位新推荐、2 条新传话"），不含姓名和传话内容——锁屏上也能看到，所以刻意这样做。
+- 检查不会"吃掉"变化：用户点开来找你时，`sync` 照样能看到全部新动态。同一组变化只提醒一次。
+- 网络不通时静默跳过，不会误报。
+- 用户说"别提醒了"→ `yuelao notify uninstall`；查看状态 `yuelao notify status`。
+- 非 macOS 系统会打印一行 crontab，让用户自己加（不替用户改 crontab）。
 
 ### 推荐处理完了
 

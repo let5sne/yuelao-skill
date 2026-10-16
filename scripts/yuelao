@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 月老 CLI v0.6 — 统一入口
+# 月老 CLI v0.7 — 统一入口
 #
 # 所有后端交互和本地状态管理都在这一个脚本里。
 # 本地文件（默认 ~/.yuelao/，可用 YUELAO_HOME 覆盖）：
@@ -211,6 +211,10 @@ JQ_SYNC_LIST='
 cmd_sync() {
   require_config; ensure_state
   local uid; uid=$(cfg user_id)
+  # --peek：只计算变化、不写本地状态。给 notify 用——通知检查不能"吃掉"变化，
+  # 否则月老下次 sync 时就看不到这些新推荐/新传话了。
+  local peek=0
+  [[ "${1:-}" == "--peek" ]] && peek=1
 
   # 每类查询单独记录成败。网络故障不能伪装成"没有数据"——否则月老会跟用户说
   # "暂时没新进展"，而实际上是后端不可用。
@@ -251,7 +255,7 @@ cmd_sync() {
       res=$(api GET "${API_BASE}/exchange/${mid}?user_id=${uid}" 2>/dev/null) || res='{}'
       c=$(echo "$res" | jq -r '.contact // empty')
       if [[ -n "$c" ]]; then
-        update_state --arg m "$mid" --arg c "$c" \
+        [[ "$peek" == 1 ]] || update_state --arg m "$mid" --arg c "$c" \
           '.exchanges[$m].partner_contact = $c | .exchanges[$m].received_at = (now|floor)'
         new_contacts=$(echo "$new_contacts" | jq --arg m "$mid" --arg c "$c" '. + [{match_id:$m, contact:$c}]')
       fi
@@ -315,6 +319,8 @@ cmd_sync() {
         | select($d >= 3)
         | {rec_id: $r, match_id: $m, days_since_contact: $d} ]
     }'
+
+  [[ "$peek" == 1 ]] && return 0
 
   # 更新快照。只覆盖拉取成功的部分：如果 recommendations 拉取失败而这里照样把
   # .recs 写成 {}，下次 sync 成功时全部推荐都会被当成"新推荐"重报一遍。
@@ -405,6 +411,156 @@ cmd_exchange() {
       fi
       ;;
     *) err "Usage: yuelao exchange <submit|get> <match_id> [contact]" ;;
+  esac
+}
+
+# ── 主动通知 ──
+#
+# 月老只在用户打开 agent 时才会 sync，有新推荐、对方回话了，用户不打开就永远不知道。
+# notify 用 sync --peek 检查变化（不写快照，月老下次 sync 照样能看到），有新东西就发一条
+# 系统通知。通知里只有数量，不含姓名、职业、传话内容——锁屏和通知中心会显示它。
+# 同一组变化只提醒一次（按变化内容做摘要去重），月老 sync 之后变化清零，自然不再提醒。
+
+NOTIFY_LABEL="cn.ciyuanlife.yuelao.notify"
+
+notify_send() { # notify_send <title> <body>
+  local title="$1" body="$2"
+  if [[ -n "${YUELAO_NOTIFY_CMD:-}" ]]; then
+    "$YUELAO_NOTIFY_CMD" "$title" "$body"
+  elif command -v osascript >/dev/null 2>&1; then
+    # 走 argv 传参，不把文本拼进 AppleScript 源码，免得引号/反斜杠出问题。
+    osascript -e 'on run argv' -e 'display notification (item 2 of argv) with title (item 1 of argv)' \
+      -e 'end run' "$title" "$body" >/dev/null
+  elif command -v notify-send >/dev/null 2>&1; then
+    notify-send "$title" "$body"
+  else
+    printf '%s: %s\n' "$title" "$body"
+  fi
+}
+
+notify_run() {
+  require_config; ensure_state
+  local out
+  out=$(cmd_sync --peek) || { echo '{"notified":false,"reason":"sync_failed"}'; return 0; }
+  # 后台连不上时不提醒：既不该报"有新消息"，也不该用错误打扰用户。
+  if [[ "$(jq -r '.partial' <<<"$out")" == "true" ]]; then
+    echo '{"notified":false,"reason":"partial"}'; return 0
+  fi
+  local summary
+  summary=$(jq -c '
+    .changes as $c
+    | {
+        new_recommendations: ($c.new_recommendations | length),
+        matched: ([$c.status_changes[] | select(.to == "matched")] | length),
+        messages: ($c.new_messages | length),
+        contacts: ($c.contacts_received | length),
+        expired: ([$c.status_changes[] | select(.to == "expired")] | length),
+        digest: ([ ($c.new_recommendations[] | "r" + .),
+                   ($c.status_changes[] | "s" + .id + ":" + .to),
+                   ($c.new_messages[] | "m" + (.id | tostring)),
+                   ($c.contacts_received[] | "c" + (.match_id | tostring)) ] | sort | join(","))
+      }' <<<"$out")
+  local digest last
+  digest=$(jq -r '.digest' <<<"$summary")
+  last=$(jq -r '.notified_digest // ""' "$STATE")
+  if [[ -z "$digest" || "$digest" == "$last" ]]; then
+    jq -c '{notified:false, reason:(if .digest == "" then "no_changes" else "already_notified" end)}' <<<"$summary"
+    return 0
+  fi
+  local body
+  body=$(jq -r '
+    [ (if .matched > 0 then "\(.matched) 位双方都同意了" else empty end),
+      (if .contacts > 0 then "\(.contacts) 位的联系方式到了" else empty end),
+      (if .new_recommendations > 0 then "\(.new_recommendations) 位新推荐" else empty end),
+      (if .messages > 0 then "\(.messages) 条新传话" else empty end),
+      (if .expired > 0 then "\(.expired) 条推荐已过期" else empty end) ]
+    | if length == 0 then "有新的进展" else join("、") end' <<<"$summary")
+  notify_send "月老" "${body}。打开你的 AI 助手，说一声“月老”就能看。"
+  update_state --arg d "$digest" '.notified_digest = $d | .notified_at = (now | floor)'
+  jq -c --arg b "$body" '{notified:true, body:$b} + (del(.digest))' <<<"$summary"
+}
+
+notify_plist_path() { echo "${YUELAO_LAUNCHD_DIR:-$HOME/Library/LaunchAgents}/${NOTIFY_LABEL}.plist"; }
+
+xml_escape() { sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' <<<"$1"; }
+
+notify_install() {
+  require_config; ensure_state
+  local minutes="${1:-30}"
+  [[ "$minutes" =~ ^[0-9]+$ ]] && (( minutes >= 10 && minutes <= 1440 )) \
+    || err "Interval must be an integer between 10 and 1440 minutes"
+  local self="$CLI_DIR/yuelao" os="${YUELAO_OS:-$(uname -s)}"
+  if [[ "$os" != "Darwin" ]]; then
+    # 非 macOS 不替用户改 crontab，给出一行让 TA 自己加。
+    echo "Add this line with 'crontab -e':"
+    echo "*/${minutes} * * * * YUELAO_HOME=${HN_DIR} ${self} notify >> ${HN_DIR}/notify.log 2>&1"
+    return 0
+  fi
+  local plist env_xml="" k v
+  plist=$(notify_plist_path)
+  mkdir -p "$(dirname "$plist")"
+  # launchd 不继承登录 shell 的环境：PATH 要显式给（jq/curl/python3，以及 Homebrew 的
+  # bash——macOS 自带 /bin/bash 是 3.2，所以经 /usr/bin/env 按 PATH 找），代理变量也要带上，
+  # 否则在需要代理的网络里后台检查会一直失败（失败时静默，不会误报）。
+  for k in PATH YUELAO_HOME https_proxy http_proxy all_proxy HTTPS_PROXY HTTP_PROXY ALL_PROXY; do
+    v="${!k:-}"
+    [[ "$k" == PATH ]] && v="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:${PATH:-}"
+    [[ "$k" == YUELAO_HOME ]] && v="$HN_DIR"
+    [[ -n "$v" ]] && env_xml+="    <key>${k}</key><string>$(xml_escape "$v")</string>"$'\n'
+  done
+  cat > "$plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>${NOTIFY_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array><string>/usr/bin/env</string><string>bash</string><string>$(xml_escape "$self")</string><string>notify</string></array>
+  <key>StartInterval</key><integer>$((minutes * 60))</integer>
+  <key>RunAtLoad</key><true/>
+  <key>EnvironmentVariables</key>
+  <dict>
+${env_xml}  </dict>
+  <key>StandardOutPath</key><string>$(xml_escape "$HN_DIR/notify.log")</string>
+  <key>StandardErrorPath</key><string>$(xml_escape "$HN_DIR/notify.log")</string>
+</dict>
+</plist>
+PLIST
+  chmod 644 "$plist"
+  if [[ "${YUELAO_SKIP_LAUNCHCTL:-0}" != 1 ]]; then
+    launchctl bootout "gui/$(id -u)/${NOTIFY_LABEL}" >/dev/null 2>&1 || true
+    launchctl bootstrap "gui/$(id -u)" "$plist"
+  fi
+  update_state --argjson m "$minutes" '.notify = {installed: true, interval_minutes: $m}'
+  echo "Notifications on: checking every ${minutes} minutes (${plist})."
+}
+
+notify_uninstall() {
+  ensure_state
+  local plist; plist=$(notify_plist_path)
+  if [[ "${YUELAO_OS:-$(uname -s)}" == "Darwin" ]]; then
+    if [[ "${YUELAO_SKIP_LAUNCHCTL:-0}" != 1 ]]; then
+      launchctl bootout "gui/$(id -u)/${NOTIFY_LABEL}" >/dev/null 2>&1 || true
+    fi
+    rm -f "$plist"
+  else
+    echo "Remove the 'yuelao notify' line with 'crontab -e'."
+  fi
+  update_state '.notify = {installed: false}'
+  echo "Notifications off."
+}
+
+cmd_notify() {
+  case "${1:-run}" in
+    run) notify_run ;;
+    install) notify_install "${2:-30}" ;;
+    uninstall) notify_uninstall ;;
+    status)
+      ensure_state
+      jq '{installed: (.notify.installed // false), interval_minutes: (.notify.interval_minutes // null),
+           last_notified_at: (.notified_at // null)}' "$STATE"
+      ;;
+    *) err "Usage: yuelao notify [run|install [minutes]|uninstall|status]" ;;
   esac
 }
 
@@ -609,7 +765,7 @@ yuelao — 月老 skill 统一 CLI
 
   register '<json>' [backend_url]        注册（json 也可为文件路径或 - 读 stdin）
   status                                 本地状态概览（是否注册、联系方式是否已设置）
-  sync                                   拉取全部最新数据 + 与上次快照对比，输出变化摘要
+  sync [--peek]                          拉取全部最新数据 + 与上次快照对比，输出变化摘要
   contact set <type> <value>             设置联系方式（只存本地）
   contact get                            查看联系方式
   filter <rec_id> <shown|suppressed> [rank] [reason]
@@ -626,6 +782,9 @@ yuelao — 月老 skill 统一 CLI
   message read <msg_id>                  标记已读
   block <rec_id> [reason]                拉黑：永久拒绝并关闭传话（不要求 filter 记录）
   match                                  请求新一轮推荐（推荐处理完后用）
+  notify [run]                           检查新动态，有就发一条系统通知（只含数量，不写快照）
+  notify install [minutes]               开启后台定时提醒（macOS launchd，默认 30 分钟）
+  notify uninstall | status              关闭提醒 / 查看提醒状态
   feedback submit <rec_id> '<json>'      约会后反馈 {"outcome":"chatting|met|dating|ended","rating":1-5,"comment":"..."}
   feedback list                          查看已提交反馈
   pause <on|off|status> [reason]         暂停/恢复匹配
@@ -650,6 +809,7 @@ case "$CMD" in
   filter)   cmd_filter "$@" ;;
   respond)  cmd_respond "$@" ;;
   block)    cmd_block "$@" ;;
+  notify)   cmd_notify "$@" ;;
   match)    cmd_match "$@" ;;
   exchange) cmd_exchange "$@" ;;
   message)  cmd_message "$@" ;;
