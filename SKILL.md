@@ -7,7 +7,7 @@ description: >
 license: MIT
 metadata:
   author: baozhiwei
-  version: "0.4"
+  version: "0.5"
 compatibility: Requires curl, jq, and Python 3 (standard library only). Works with any skills-compatible agent.
 ---
 
@@ -44,9 +44,13 @@ compatibility: Requires curl, jq, and Python 3 (standard library only). Works wi
 
 ```bash
 HN=~/.claude/skills/yuelao/scripts/yuelao
-[ -x "$HN" ] || HN=$(find ~/.claude/skills ~/.config/*/skills -name yuelao -type f -perm -u+x 2>/dev/null | head -1)
+[ -x "$HN" ] || HN=$(find ~/.claude ~/.agents ~/.codex ~/.cursor ~/.gemini ~/.config -maxdepth 5 \
+  -path '*/skills/*/scripts/yuelao' -type f -perm -u+x 2>/dev/null | head -1)
 "$HN" status
 ```
+
+如果你的 agent 会告诉你本 `SKILL.md` 所在目录，直接用 `<该目录>/scripts/yuelao`，不需要搜索。
+上面几处都找不到时，问用户把 skill 装在了哪里，不要猜。
 
 之后本次会话内都用 `"$HN" <command>`（同一个 bash 调用里变量才有效；跨调用就把解析出的绝对路径直接写全）。下文为可读性一律简写为 `yuelao <command>`。
 
@@ -286,7 +290,18 @@ preferences: { age_range: [25, 32], city: [北京], dealbreakers: [抽烟], nice
   `非二元`、`other` 或拼错成 `mail` 都会让 `matchable` 为 `false`。当前的匹配语义是
   严格二元异性，非二元取值在其中没有定义好的行为——与其静默地和一堆人错配，不如
   明确告诉用户这个字段用不了。
-- `city` — 非空字符串。
+- `city` — 非空字符串。写城市名即可，"北京" / "北京市" / 首尾空格 / 全角字母都会按同一城市比较；
+  但服务端**不认别名**（"帝都"、"HK" 不会被当成北京、香港），所以用正式名称。
+
+### dealbreaker 的写法
+
+`preferences.dealbreakers` 是**硬排除**：对方档案的任一字段值里出现这个词就不推荐。所以：
+
+- 写**短的肯定关键词**：`抽烟`、`异地`，不要写成整句"不能接受抽烟的人"。
+- 对方明确否定的写法不会命中："不抽烟" / "从不抽烟" / "没有抽烟习惯" / `non-smoker`。
+- **含糊表述仍然命中**："不怎么抽烟""偶尔抽烟""以前抽烟"都会被排除——宁可漏推，不放宽底线。
+- 反过来，记录用户**自己的**习惯时，用明确的否定写法（"不抽烟"），别只写一个
+  "抽烟"在某个"讨厌的事"列表里——数组里单独一项"抽烟"会被当成肯定提及。
 
 ## 隐私（对用户要说实话）
 
