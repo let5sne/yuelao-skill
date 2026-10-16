@@ -18,7 +18,7 @@
   `docs/releases/20261014T225037.md`。线上 `routes/profile.js` 与本版源码哈希一致。
 - **CLI UTF-8 前置校验**（`scripts/yuelao` + `scripts/check-utf8.py`）在那次发布之后提交，
   只在客户端生效，已安装的用户需要 `git pull` 更新 skill 目录。
-- **下面的匹配误筛修复尚未部署到服务器。**
+- 下面的匹配误筛修复已于 2026-10-16 部署，见 `docs/releases/20261016T212413.md`。
 
 ## 0.5 — 修复：底线否定误筛与城市写法不统一
 
