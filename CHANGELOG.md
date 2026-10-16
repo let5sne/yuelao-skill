@@ -15,6 +15,11 @@
   需要重新克隆（或 `git fetch && git reset --hard origin/main`）。
 - 下文历史条目里出现的 `server/…` 路径，指的是后端仓库中对应的文件（拆分后位于其根目录）。
 - CLI、Skill 与后端之间的契约不变：CLI 仍是契约的唯一真相，离线测试不依赖后端源码。
+- 文档同步：`TECHNICAL-REPORT.md` 按实际实现重写后端部分——去掉沿用自上游的 OpenClaw fork、
+  第三层 LLM 精判、MiniMax、TypeScript 等描述；API 表补齐 `/feedback/:user_id`、`/health` 与各接口的
+  真实认证要求；状态机改为按视角派生的 `pending / waiting_for_other / matched / rejected`；
+  数据模型改为双塔 `offer/seek` 向量；路线图逐项标注【已完成 / 部分 / 未开始】。README 架构图、
+  许可说明与官网页脚同步说明后端不在本仓库、MIT 只覆盖 Skill 与 CLI。
 
 ## 0.5 (2026-10-16)
 

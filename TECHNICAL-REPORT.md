@@ -2,7 +2,13 @@
 
 ## 系统概览
 
-月老是一个两层架构的 AI 婚恋匹配系统。用户端是一个遵循 [Agent Skills](https://agentskills.io) 标准的本地 Skill，后端是基于 [OpenClaw](https://github.com/openclaw/openclaw) 改造的匹配引擎。两层通过 REST API 通信。
+月老是一个两层架构的 AI 婚恋匹配系统。用户端是一个遵循 [Agent Skills](https://agentskills.io) 标准的本地 Skill，后端是一个自研的匹配服务（Node.js 原生 HTTP + PostgreSQL/pgvector）。两层通过 HTTPS REST API 通信。
+
+> 后端源码自 0.5.1 起维护在独立的私有仓库，本仓库只包含 Skill、CLI 与官网。本报告描述后端的**架构与对外契约**，
+> CLI 的离线测试锁定契约行为，不依赖后端源码。公共实例：`https://yuelao.ciyuanlife.cn`。
+>
+> 早期版本的本报告沿用了上游项目的设计描述（OpenClaw fork、第三层 LLM 精判、MiniMax、定时自进化）。
+> 那些**不是**当前后端的实现；下文已按实际实现更新，未实现的部分在路线图里逐项标注状态。
 
 ```
 用户 A 的机器                           用户 B 的机器
@@ -14,10 +20,10 @@
          │ REST API                             │ REST API
          ▼                                      ▼
 ┌──────────────────────────────────────────────────────────┐
-│                 匹配引擎 (OpenClaw fork)                   │
+│              匹配后端（Node.js，私有仓库）               │
 │                                                          │
-│  PostgreSQL    两层漏斗匹配    判断打分层    传话消息队列    │
-│  (档案+状态)   (SQL→向量)      (可选,不排序) (异步中转)      │
+│  PostgreSQL   两层漏斗匹配   判断打分层    传话消息队列  │
+│  +pgvector    (SQL→双塔向量) (可选,不排序) (异步中转)    │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -63,10 +69,10 @@ LLM 是系统里最不可靠的执行者，所以工作流程的时序和状态�
 ### 筛选反馈闭环
 
 ```
-后端推荐 → 本地月老筛选 → 回传 filter 反馈 (shown/suppressed + 理由) → 后端学习
+后端推荐 → 本地月老筛选 → 回传 filter 反馈 (shown/suppressed + 理由) → 后端记录（供未来的学习系统使用）
 ```
 
-如果某类推荐被本地月老频繁压住，说明匹配逻辑在那个维度上不准。
+如果某类推荐被本地月老频繁压住，说明匹配逻辑在那个维度上不准。目前只记录，不自动调整权重。
 
 ### 本地文件
 
@@ -79,15 +85,30 @@ LLM 是系统里最不可靠的执行者，所以工作流程的时序和状态�
 
 ## 后端：匹配引擎
 
-基于 OpenClaw 改造。OpenClaw 提供了 gateway、cron 引擎、多通道适配器等基础设施，月老在上面加了匹配逻辑、传话系统和自进化引擎。
+自研的 Node.js 服务（原生 `node:http`，唯一运行时依赖是 `pg`），数据在 PostgreSQL 16 + pgvector。
+服务只绑 `127.0.0.1`，由 Caddy 反代对外并终止 TLS。**没有**定时任务：推荐在注册或更新档案时
+即时生成，`POST /match/run` 用于手动重算。
 
-### 三层漏斗匹配
+### 两层漏斗 + 可选判断层
 
-**第一层：SQL 预筛（毫秒级）** — 硬性条件过滤：性别互斥、年龄区间交集、城市匹配、排除已推荐。200 用户 → 约 2000 候选对。
+**第一层：硬条件过滤 + 确定性打分（毫秒级）** — 性别互斥、年龄区间双向交集、城市偏好双向满足、
+双向 dealbreaker、排除已推荐。城市按归一化后的名字比较（"北京" 与 "北京市" 视为同一城市）；
+dealbreaker 只在对方档案的**值**里查找，并放过紧贴关键词的明确否定（"不抽烟"不命中"抽烟"），
+含糊表述仍然命中。通过的候选按城市、年龄、爱好重合等规则打分，**这个分数决定最终排序**，
+因此"为什么看到这个人"永远可以追溯到可解释的规则。
 
-**第二层：向量粗排（秒级）** — 通义千问 text-embedding-v4，档案文本转 1024 维向量，余弦相似度取 top-K。Embedding 按 text hash 缓存，档案没变不重算。
+**第二层：双塔向量交叉打分（秒级）** — 每人存两个 1024 维向量：`offer`（这个人作为伴侣是什么样）
+和 `seek`（这个人在找什么样的人），`score(A,B) = sim(A.seek, B.offer) × sim(B.seek, A.offer)`。
+乘法让"单向仰慕"直接降到 0，与双向同意状态机语义一致。Embedding 走 OpenAI 兼容接口
+（默认通义千问 `text-embedding-v4`），按文本哈希缓存；未配置密钥时退化为确定性的本地哈希 provider。
+第二层只决定"谁进入推荐池"，不改变排序。每轮最多入库 5 条推荐。
 
-**第三层：LLM 精判（分钟级）** — 对候选对调用 LLM 深度评估，输出分数、双向推荐理由和挑战提示。评估维度：互补性(40%)、价值观兼容(30%)、生活方式(20%)、基本条件(10%)。
+**判断层（可选）：四维复合打分** — 启用时由 TypeSafe System One（Jev）对候选对回答四个类型化评分
+问题：互补性 40% / 价值观兼容 30% / 生活方式 20% / 基本条件 10%，权重在代码里合成，结果附带置信度，
+写进 `score_detail.judgment`。它**不排序、不压住推荐、不生成话术**——最终决定权在本地月老和用户。
+未配置时整条管道行为不变，`judgment` 为 `null`。
+
+**不做服务端 LLM 精判。** 精判被下放到本地月老：她掌握档案之外的私有上下文，而且她的算力不花服务端的钱。
 
 ### 自进化系统
 
@@ -100,7 +121,7 @@ LLM 是系统里最不可靠的执行者，所以工作流程的时序和状态�
 | 约会反馈 | chatting/met/dating/ended + 评分 | 用户回访 | 匹配的真实结果 |
 | 进化分析 | insights + 阈值调整 | LLM 复盘 | 系统自我认知 |
 
-**进化流程：** 每日复盘最近 30 天数据 → 分析成功/失败因素 → 生成 insights → 调整阈值权重 → 注入下次匹配的 prompt。
+**设计中的进化流程（未实现）：** 定期复盘最近 30 天数据 → 分析成功/失败因素 → 生成候选假设 → 通过门禁后调整维度权重。
 
 > ⚠️ **这一节描述的是设计意图，不是当前状态。** 四层反馈里目前三层永远收不到数据
 > ——没有推荐被生成过，就没有筛选、没有决定、没有约会反馈。所以"自进化"现在
@@ -120,10 +141,12 @@ A："帮我问问她周末干嘛" → A 的月老包装 → POST /messages → �
 ### 双向同意状态机
 
 ```
-recommended → A accept → waiting_for_b
-recommended → B accept → waiting_for_a
-waiting_for_x → X accept → matched (可交换联系方式)
-任一方 reject → rejected
+服务端只存两侧各自的决定（status_a / status_b），客户端看到的 status 按视角派生：
+
+我未表态（无论对方是否已接受）   → pending            进入待筛选
+我已接受、对方未表态             → waiting_for_other
+双方都接受                       → matched            可交换联系方式
+任一方拒绝                       → rejected
 ```
 
 联系方式交换只有 `matched` 状态才能提交和获取。
@@ -131,13 +154,13 @@ waiting_for_x → X accept → matched (可交换联系方式)
 ## 数据模型
 
 ```
-profiles            — 用户档案（UUID, summary JSONB, preferences JSONB, status）
-profile_embeddings  — 向量缓存（user_id, embedding FLOAT8[], text_hash）
-recommendations     — 匹配推荐（user_a, user_b, score, reasons, status）
-exchanges           — 联系方式交换（match_id, user_id, contact）
+profiles            — 用户档案（UUID, summary JSONB, preferences JSONB, status, token 哈希）
+profile_embeddings  — 双塔向量（user_id, offer vector(1024), seek vector(1024), provider, text_hash）
+recommendations     — 匹配推荐（user_a, user_b, score, score_detail, 双向理由, status_a/status_b, 决定原因）
+exchanges           — 联系方式交换（recommendation_id, user_id, contact）
 filter_feedback     — 月老筛选反馈（recommendation_id, action, reason）
 messages            — 传话消息（from_user, to_user, content, read_at）
-date_feedback       — 约会后反馈（recommendation_id, outcome, rating, comment）
+date_feedback       — 约会后反馈（recommendation_id, outcome, rating, rating_source, comment）
 ```
 
 ## API
@@ -154,13 +177,18 @@ date_feedback       — 约会后反馈（recommendation_id, outcome, rating, co
 | `/profile/:id/resume` | POST | 恢复匹配 | Bearer token |
 | `/recommendations/:id` | GET | 获取推荐（含对方脱敏画像） | Bearer token |
 | `/response` | POST | 接受/拒绝推荐 | Bearer token |
-| `/recommendations/:id/filter` | POST | 月老筛选反馈 | 无（见下方安全项） |
-| `/exchange/:match_id` | POST/GET | 联系方式交换 | Bearer token |
+| `/recommendations/:id/filter` | POST | 月老筛选反馈（`:id` 为推荐 ID） | Bearer token |
+| `/exchange/:rec_id` | POST/GET | 联系方式交换（仅 `matched`） | Bearer token |
 | `/messages` | POST | 发送传话 | Bearer token |
 | `/messages/:user_id` | GET | 查看收件箱 | Bearer token |
 | `/messages/:id/read` | POST | 标记已读 | Bearer token |
-| `/feedback` | POST/GET | 约会后反馈 | Bearer token |
-| `/match/run`, `/evolve` 等 | POST/GET | 运维接口 | 无（见下方安全项） |
+| `/feedback` | POST | 提交约会后反馈 | Bearer token |
+| `/feedback/:user_id` | GET | 查看约会反馈 | Bearer token |
+| `/match/run` | POST | 为自己重算推荐；`?scope=all` 全量重算 | Bearer token；`scope=all` 另需 `X-Admin-Token` |
+| `/health` | GET | 健康检查（不在 API 前缀下） | 无 |
+
+身份只来自 Bearer token：服务端用 token 反查用户，URL 里的 `user_id` 只用来校验是否一致，不一致返回 403。
+注册是唯一免认证的接口，按 IP 限流（默认每小时 5 次）。
 
 ## 数据安全（现状，如实陈述）
 
@@ -178,37 +206,36 @@ date_feedback       — 约会后反馈（recommendation_id, outcome, rating, co
 
 ### 安全与信任（最高优先级）
 
-1. **HTTPS + 域名。** 当前为明文 HTTP + 裸 IP，token、画像、联系方式明文传输，上线试用前必须切换。
-2. **身份只来自 token。** 去掉 URL 路径和 payload 里的 user_id，服务端从 Bearer token 反查身份，整类 IDOR 风险直接消失。
-3. **无认证接口加锁。** `/recommendations/:id/filter`（可污染学习信号）、`/match/run`、`/evolve`（可被滥用烧 LLM 费用）全部加认证；注册加限流。
-4. **端到端加密中转。** 匹配建立时双方经服务器交换公钥，之后传话和联系方式用对方公钥加密——服务器从"承诺不看"变成"看不了"。落地后更新隐私文档。
-5. **验证与治理。** 分级实名验证（手机→更高级别）、举报/拉黑、传话内容安全审查。婚恋场景的对抗面大，虚假档案收割联系方式是真实威胁。
+1. **HTTPS + 域名。**【已完成】公共实例为 `https://yuelao.ciyuanlife.cn`，后端只绑本机，由反代终止 TLS。
+2. **身份只来自 token。**【已完成】服务端从 Bearer token 反查身份；URL 中保留的 `user_id` 只做一致性校验，不一致返回 403。
+3. **无认证接口加锁。**【已完成】筛选反馈与 `/match/run` 需要 token，全量重算另需运维密钥；`/evolve` 不存在；注册按 IP 限流。
+4. **端到端加密中转。**【未开始】 匹配建立时双方经服务器交换公钥，之后传话和联系方式用对方公钥加密——服务器从"承诺不看"变成"看不了"。落地后更新隐私文档。
+5. **验证与治理。**【未开始】 分级实名验证（手机→更高级别）、举报/拉黑、传话内容安全审查。婚恋场景的对抗面大，虚假档案收割联系方式是真实威胁。
 
 ### 匹配引擎成本与质量重构
 
-6. **LLM 只判"人"，不判"对"（O(N²)→O(N)）。** 注册/档案更新时用小模型对每个用户深度编码一次，产出"供给画像"（这个人作为伴侣是什么样）、"需求画像"（TA 真正需要什么样的人，由 LLM 从全档案推断而非照抄 preferences）和硬约束表。
-7. **双塔检索替代档案相似度。** 当前向量层计算两份档案的相似度，度量的是"像不像"而非"合不合适"，系统性奖励同质。改为 `score(A,B) = sim(A.seek, B.offer) × sim(B.seek, A.offer)`——双向交叉打分，单向仰慕自动降权，与双向同意状态机的语义一致。pgvector ANN 索引，毫秒级。
-8. **精判下放边缘。** 服务端输出紧凑候选卡（脱敏画像+分数拆解，每张几百 token），最终判断交给本地月老——她有档案外的私有上下文，且她的算力免费。服务端残余的 LLM 复核用小模型 + prompt caching + Batch API。
-9. **事件驱动替代每日全量批跑。** 新注册/档案变更才触发编码与增量检索；只为活跃用户计算。
+6. **LLM 只判"人"，不判"对"（O(N²)→O(N)）。**【部分】已按人编码 offer/seek 向量，但画像文本目前由规则模板生成，尚未用 LLM 推断。 注册/档案更新时用小模型对每个用户深度编码一次，产出"供给画像"（这个人作为伴侣是什么样）、"需求画像"（TA 真正需要什么样的人，由 LLM 从全档案推断而非照抄 preferences）和硬约束表。
+7. **双塔检索替代档案相似度。**【已完成】 当前向量层计算两份档案的相似度，度量的是"像不像"而非"合不合适"，系统性奖励同质。改为 `score(A,B) = sim(A.seek, B.offer) × sim(B.seek, A.offer)`——双向交叉打分，单向仰慕自动降权，与双向同意状态机的语义一致。pgvector ANN 索引，毫秒级。
+8. **精判下放边缘。**【已完成主体】服务端不做 LLM 精判，最终判断由本地月老完成；可选判断层只给数字。 服务端输出紧凑候选卡（脱敏画像+分数拆解，每张几百 token），最终判断交给本地月老——她有档案外的私有上下文，且她的算力免费。服务端残余的 LLM 复核用小模型 + prompt caching + Batch API。
+9. **事件驱动替代每日全量批跑。**【已完成】 新注册/档案变更才触发编码与增量检索；只为活跃用户计算。
 
 ### 学习系统（自动化 + 门禁）
 
 10. **参数化 rubric + 贝叶斯收缩。** 匹配维度权重显式化：`有效权重 = n/(n+k)·自有数据估计 + k/(n+k)·外部先验`。先验来自关系科学研究结论（价值观相似性 > 兴趣相似性、地理距离的强流失效应、情绪稳定性的预测力等）和公开数据集校准。样本量上来后权重自动向自有数据过渡，每个维度独立。
 
     **部分已实现**：rubric 与先验权重已落地在后端的 `judgment.js`（互补性 40% / 价值观 30% / 生活方式 20% / 基本条件 10%，可用 `JUDGMENT_WEIGHTS` 覆盖），由 TypeSafe System One 模型产出各维分数与置信度，权重在代码里合成——**不是**写在提示词里。n=0 时该公式退化为纯先验，正是当前状态；反馈数据攒起来后各维度可独立向自有数据过渡，权重表结构不用改。**尚未实现**的是收缩本身（那把 `n` 从 0 变大的那一步）——它需要 `date_feedback` 有数据，而当前池子里还没有一次真实约会反馈。
-11. **管道全自动，部署有门禁。** 每日复盘产出的是候选假设（效应量+样本量+置信区间），通过显著性检验和历史回放测试才自动生效，否则留在假设池继续攒证据。
-12. **探索配额。** 5-10% 的推荐标记为探索性展示，防止月老筛选造成的选择偏差让反馈闭环退化为自我确认。
-13. **指标阶梯锚定终局。** 展示→accept→双向匹配→交换→30 天仍在发展，学习目标锚定后端信号，前端信号只做代理并标注偏差。
+11. **管道全自动，部署有门禁。**【未开始】 每日复盘产出的是候选假设（效应量+样本量+置信区间），通过显著性检验和历史回放测试才自动生效，否则留在假设池继续攒证据。
+12. **探索配额。**【未开始】 5-10% 的推荐标记为探索性展示，防止月老筛选造成的选择偏差让反馈闭环退化为自我确认。
+13. **指标阶梯锚定终局。**【未开始】 展示→accept→双向匹配→交换→30 天仍在发展，学习目标锚定后端信号，前端信号只做代理并标注偏差。
 
 ## 技术栈
 
 | 组件 | 技术 |
 |------|------|
-| 用户端 | Agent Skills 标准（SKILL.md + `yuelao` bash CLI） |
-| 后端 | TypeScript / Node.js（OpenClaw fork） |
-| 数据库 | PostgreSQL 16 |
-| LLM（匹配） | MiniMax M2.7（通过 OpenClaw 配置） |
-| LLM（用户对话） | 用户本地 Agent 工具自带的 LLM |
-| Embedding | 阿里通义千问 text-embedding-v4 |
-| 判断打分（服务端） | TypeSafe System One（Jev）——四维复合打分，返回分数 + 置信度，不做决定 |
-| 部署 | Docker（PostgreSQL）+ Node.js 直接运行 |
+| 用户端 | Agent Skills 标准（SKILL.md + `yuelao` bash CLI，依赖 curl、jq、Python 3） |
+| 后端 | Node.js ≥22（原生 HTTP，依赖 `pg`），私有仓库 |
+| 数据库 | PostgreSQL 16 + pgvector |
+| Embedding | OpenAI 兼容接口，默认阿里通义千问 text-embedding-v4（1024 维） |
+| 判断打分（服务端，可选） | TypeSafe System One（Jev）——四维复合打分，返回分数 + 置信度，不做决定 |
+| LLM（用户对话与最终判断） | 用户本地 Agent 工具自带的 LLM |
+| 部署 | Docker（pgvector）+ systemd 运行 Node.js + Caddy 反代 |
